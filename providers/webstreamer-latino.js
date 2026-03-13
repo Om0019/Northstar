@@ -1012,14 +1012,15 @@ function resolveDoodStream(result, url) {
     }
     const titlePage = import_cheerio_without_node_native2.default.load(html);
     const title = titlePage("title").text().trim().replace(/ - DoodStream$/i, "").trim() || result.title;
-    const passMatch = html.match(/(\/pass_md5\/[^'" ]+)/);
+    const passMatch = html.match(/\$\.get\(\s*['"]([^'"]*\/pass_md5\/[^'"]+)['"]\s*,/i) || html.match(/(\/pass_md5\/[^'"\\\s]+)/);
     if (!passMatch) {
       console.log(`[WebstreamerLatino] Dood pass_md5 miss: ${normalized.href}`);
       return [];
     }
-    const tokenMatch = html.match(/token=([^&'"]+)/);
-    const expiryMatch = html.match(/expiry=([^&'"]+)/);
     const passUrl = new URL(passMatch[1], normalized.origin).href;
+    const passToken = passUrl.split("/").filter(Boolean).pop();
+    const tokenMatch = html.match(/token=([^&'"]+)/);
+    const token = (tokenMatch == null ? void 0 : tokenMatch[1]) || passToken;
     const passResponse = yield fetchText(passUrl, {
       headers: {
         Referer: normalized.href,
@@ -1033,12 +1034,10 @@ function resolveDoodStream(result, url) {
     const directBase = passResponse.trim();
     const suffix = Math.random().toString(36).slice(2, 12);
     const directUrl = new URL(`${directBase}${suffix}`);
-    if (tokenMatch) {
-      directUrl.searchParams.set("token", tokenMatch[1]);
+    if (token) {
+      directUrl.searchParams.set("token", token);
     }
-    if (expiryMatch) {
-      directUrl.searchParams.set("expiry", expiryMatch[1]);
-    }
+    directUrl.searchParams.set("expiry", String(Date.now()));
     return [buildStream(result, {
       title,
       url: directUrl.href,
