@@ -22,6 +22,7 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   await Promise.allSettled([
     prewarmSource(SOURCE_BASES.cuevana),
     prewarmSource(SOURCE_BASES.verhdlink),
+    prewarmSource(SOURCE_BASES.tioplus),
   ]);
 
   const tasks = [
@@ -29,6 +30,7 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
     searchCineHdPlus(tmdb, mediaType, season, episode),
     searchHomeCine(tmdb, season, episode),
     searchVerHdLink(tmdb, mediaType),
+    searchTioPlus(tmdb, mediaType),
   ];
 
   const settled = await Promise.allSettled(tasks);
@@ -329,4 +331,141 @@ async function searchVerHdLink(tmdb, mediaType) {
   });
 
   return results;
+}
+
+async function searchTioPlus(tmdb, mediaType) {
+  if (mediaType !== 'movie') {
+    return [];
+  }
+
+  const candidates = [tmdb.originalTitle, tmdb.title].filter(Boolean);
+  let pageUrl = null;
+
+  for (const candidate of candidates) {
+    const resultUrl = await findTioPlusMovie(candidate, tmdb.year);
+    if (resultUrl) {
+      pageUrl = resultUrl;
+      break;
+    }
+  }
+
+  if (!pageUrl) {
+    return [];
+  }
+
+  const html = await fetchText(pageUrl, {
+    headers: { Referer: SOURCE_BASES.tioplus },
+  });
+  const $ = cheerio.load(html);
+  const results = [];
+
+  $('.bg-tabs > div').each((_, section) => {
+    const buttonText = $(section).find('button').first().text().toLowerCase();
+    if (!buttonText.includes('latino')) {
+      return;
+    }
+
+    $(section).find('li[data-server]').each((__, el) => {
+      const token = $(el).attr('data-server');
+      if (!token) {
+        return;
+      }
+
+      results.push({
+        source: 'TioPlus',
+        ...languageMeta('mx'),
+        title: buildTitle(tmdb),
+        url: `${SOURCE_BASES.tioplus}/player/${Buffer.from(token).toString('base64')}`,
+        referer: pageUrl,
+        headers: { Referer: pageUrl },
+        _tioplusToken: token,
+      });
+    });
+  });
+
+  if (results.length === 0) {
+    return [];
+  }
+
+  const resolved = await Promise.allSettled(results.map(resolveTioPlusPlayer));
+
+  return resolved.flatMap((result) => (
+    result.status === 'fulfilled' && result.value ? [result.value] : []
+  ));
+}
+
+async function findTioPlusMovie(title, year) {
+  const searchUrl = `${SOURCE_BASES.tioplus}/api/search/${encodeURIComponent(title)}`;
+  const html = await fetchText(searchUrl, {
+    headers: {
+      Referer: `${SOURCE_BASES.tioplus}/search`,
+      Accept: 'text/html,*/*;q=0.8',
+      'X-Requested-With': 'XMLHttpRequest',
+    },
+  });
+
+  if (/No hay resultados/i.test(html)) {
+    return null;
+  }
+
+  const $ = cheerio.load(`<div>${html}</div>`);
+  const targetNorm = normalizeTitle(title);
+  let best = null;
+
+  $('a.itemA[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    const rawTitle = $(el).find('h2').text().trim();
+    const kind = $(el).find('.typeItem').text().toLowerCase();
+    if (!href || !rawTitle || kind.includes('serie')) {
+      return;
+    }
+
+    let score = 0;
+    const norm = normalizeTitle(rawTitle.replace(/\(\d{4}\)/, '').trim());
+    if (norm === targetNorm) {
+      score += 10;
+    }
+    if (norm.includes(targetNorm) || targetNorm.includes(norm)) {
+      score += 5;
+    }
+
+    const matchYear = rawTitle.match(/\((\d{4})\)/);
+    if (year && matchYear && matchYear[1] === year) {
+      score += 4;
+    }
+
+    if (!year && matchYear) {
+      score += 1;
+    }
+
+    if (!best) {
+      score += 1;
+    }
+
+    if (!best || score > best.score) {
+      best = { href, score };
+    }
+  });
+
+  return best && best.score >= 1 ? best.href : null;
+}
+
+async function resolveTioPlusPlayer(result) {
+  const html = await fetchText(result.url, {
+    headers: result.headers,
+  });
+  const match = html.match(/window\.location\.href\s*=\s*'([^']+)'/);
+  if (!match || !match[1]) {
+    return null;
+  }
+
+  return {
+    source: result.source,
+    language: result.language,
+    contentLanguage: result.contentLanguage,
+    title: result.title,
+    url: match[1],
+    referer: result.referer,
+    headers: { Referer: result.referer },
+  };
 }

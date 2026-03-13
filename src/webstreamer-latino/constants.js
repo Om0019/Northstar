@@ -16,4 +16,5 @@ export const SOURCE_BASES = {
   cinehdplus: 'https://cinehdplus.gratis',
   homecine: 'https://www3.homecine.to',
   verhdlink: 'https://verhdlink.cam',
+  tioplus: 'https://tioplus.app',
 };
