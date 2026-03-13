@@ -806,6 +806,9 @@ function resolveOne(result) {
       if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
         return resolveMixdrop(result, url);
       }
+      if (/player\.cuevana3\.eu/i.test(host)) {
+        return resolveCuevanaPlayer(result, url);
+      }
       if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
         return resolveDoodStream(result, url);
       }
@@ -996,6 +999,29 @@ function resolveMixdrop(result, url) {
       headers: streamHeaders,
       player: "Mixdrop"
     })];
+  });
+}
+function resolveCuevanaPlayer(result, url) {
+  return __async(this, null, function* () {
+    const html = yield fetchText(url.href, {
+      headers: __spreadProps(__spreadValues({}, result.headers || {}), {
+        Referer: result.referer || "https://ww1.cuevana3.is/"
+      })
+    }).catch(() => null);
+    if (!html) {
+      console.log(`[WebstreamerLatino] Cuevana player miss: ${url.href}`);
+      return [];
+    }
+    const targetMatch = html.match(/var\s+url\s*=\s*'([^']+)'/i) || html.match(/var\s+url\s*=\s*"([^"]+)"/i) || html.match(/<iframe[^>]+src="([^"]+)"/i) || html.match(/<iframe[^>]+src='([^']+)'/i);
+    if (!targetMatch) {
+      console.log(`[WebstreamerLatino] Cuevana player parse miss: ${url.href}`);
+      return [];
+    }
+    return resolveOne(__spreadProps(__spreadValues({}, result), {
+      url: absoluteUrl(targetMatch[1], url.origin),
+      referer: url.href,
+      headers: { Referer: url.href }
+    }));
   });
 }
 function resolveDoodStream(result, url) {
