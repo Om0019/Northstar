@@ -61,12 +61,16 @@ function requestBase(req) {
 
     const host = req && req.headers && req.headers.host;
     if (host) {
-        const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+        const proto = req.headers['x-forwarded-proto']
+            || req.headers['x-forwarded-protocol']
+            || req.protocol
+            || (host.includes('onrender.com') || host.includes('koyeb.app') ? 'https' : 'http');
         return `${proto}://${host}`;
     }
 
     if (LAST_HOST && !LAST_HOST.startsWith('127.0.0.1')) {
-        return `http://${LAST_HOST}`;
+        const proto = LAST_HOST.includes('onrender.com') || LAST_HOST.includes('koyeb.app') ? 'https' : 'http';
+        return `${proto}://${LAST_HOST}`;
     }
 
     return ADDON_BASE;
@@ -219,7 +223,7 @@ function startServer(addonInterface, opts = {}) {
 const PORT = process.env.PORT || 7010;
 
 startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
-    ADDON_BASE = PUBLIC_ADDON_BASE || url.replace(/\/manifest\.json$/, '');
+    ADDON_BASE = PUBLIC_ADDON_BASE || '';
     console.log('addon base url:', ADDON_BASE);
 
     const app = server._events.request;
