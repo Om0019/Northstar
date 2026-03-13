@@ -1041,11 +1041,17 @@ function resolveDoodStream(result, url) {
       directUrl.searchParams.set("token", token);
     }
     directUrl.searchParams.set("expiry", String(Date.now()));
+    const streamHeaders = { Referer: normalized.href };
+    const isPlayable = yield validateDirectMedia(directUrl.href, streamHeaders);
+    if (!isPlayable) {
+      console.log(`[WebstreamerLatino] Dood blocked: ${normalized.href}`);
+      return [];
+    }
     return [buildStream(result, {
       title,
       url: directUrl.href,
       quality: "Auto",
-      headers: { Referer: normalized.href },
+      headers: streamHeaders,
       player: "DoodStream"
     })];
   });
