@@ -1,6 +1,6 @@
 import cheerio from 'cheerio-without-node-native';
 import { SOURCE_BASES } from './constants.js';
-import { fetchText } from './http.js';
+import { fetchPage, fetchText } from './http.js';
 import { buildEpisodeTag } from './tmdb.js';
 import { normalizeTitle } from './utils.js';
 
@@ -19,6 +19,11 @@ function buildTitle(tmdb, season, episode) {
 }
 
 export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
+  await Promise.allSettled([
+    prewarmSource(SOURCE_BASES.cuevana),
+    prewarmSource(SOURCE_BASES.verhdlink),
+  ]);
+
   const tasks = [
     searchCuevana(tmdb, season, episode),
     searchCineHdPlus(tmdb, mediaType, season, episode),
@@ -36,6 +41,15 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
     console.error('[WebstreamerLatino] Source error:', result.reason ? result.reason.message : result.reason);
     return [];
   });
+}
+
+async function prewarmSource(baseUrl) {
+  await fetchPage(baseUrl, {
+    headers: {
+      Referer: baseUrl,
+      Origin: new URL(baseUrl).origin,
+    },
+  }).catch(() => null);
 }
 
 async function searchCuevana(tmdb, season, episode) {

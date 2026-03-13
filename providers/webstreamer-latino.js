@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-13T06:27:31.255Z
+ * Generated: 2026-03-13T06:34:04.599Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -83,7 +83,11 @@ var TMDB_BASE_URL = "https://api.themoviedb.org/3";
 var DEFAULT_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+  "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+  "Accept-Encoding": "gzip, deflate, br",
+  "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"'
 };
 var SOURCE_BASES = {
   cuevana: "https://ww1.cuevana3.is",
@@ -350,6 +354,10 @@ function buildTitle(tmdb, season, episode) {
 }
 function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   return __async(this, null, function* () {
+    yield Promise.allSettled([
+      prewarmSource(SOURCE_BASES.cuevana),
+      prewarmSource(SOURCE_BASES.verhdlink)
+    ]);
     const tasks = [
       searchCuevana(tmdb, season, episode),
       searchCineHdPlus(tmdb, mediaType, season, episode),
@@ -364,6 +372,16 @@ function getLatinoSourceResults(tmdb, mediaType, season, episode) {
       console.error("[WebstreamerLatino] Source error:", result.reason ? result.reason.message : result.reason);
       return [];
     });
+  });
+}
+function prewarmSource(baseUrl) {
+  return __async(this, null, function* () {
+    yield fetchPage(baseUrl, {
+      headers: {
+        Referer: baseUrl,
+        Origin: new URL(baseUrl).origin
+      }
+    }).catch(() => null);
   });
 }
 function searchCuevana(tmdb, season, episode) {
