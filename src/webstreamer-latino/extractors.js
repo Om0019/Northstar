@@ -296,7 +296,11 @@ async function resolveDoodStream(result, url) {
   }
 
   const normalized = new URL(`https://dood.to/e/${videoId}`);
-  const headers = { ...(result.headers || {}), Referer: result.referer || url.href };
+  const headers = {
+    ...(result.headers || {}),
+    Referer: `${normalized.origin}/`,
+    Origin: normalized.origin,
+  };
   const html = await fetchText(normalized.href, { headers }).catch(() => null);
 
   if (!html || /Video not found/i.test(html)) {

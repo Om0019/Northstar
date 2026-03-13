@@ -1004,7 +1004,10 @@ function resolveDoodStream(result, url) {
       return [];
     }
     const normalized = new URL(`https://dood.to/e/${videoId}`);
-    const headers = __spreadProps(__spreadValues({}, result.headers || {}), { Referer: result.referer || url.href });
+    const headers = __spreadProps(__spreadValues({}, result.headers || {}), {
+      Referer: `${normalized.origin}/`,
+      Origin: normalized.origin
+    });
     const html = yield fetchText(normalized.href, { headers }).catch(() => null);
     if (!html || /Video not found/i.test(html)) {
       console.log(`[WebstreamerLatino] Dood miss: ${url.href}`);
