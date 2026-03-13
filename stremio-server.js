@@ -84,6 +84,29 @@ function proxyWrap(url, headers) {
     return base ? `${base}${proxyPath}` : proxyPath;
 }
 
+function normalizeProxyTarget(rawUrl, headers = {}) {
+    if (!rawUrl) {
+        return rawUrl;
+    }
+
+    if (rawUrl.startsWith('//')) {
+        return `https:${rawUrl}`;
+    }
+
+    if (rawUrl.startsWith('/')) {
+        const base = headers.Referer || headers.Referer || headers.Origin || headers.origin;
+        if (base) {
+            try {
+                return new URL(rawUrl, base).href;
+            } catch (_error) {
+                return rawUrl;
+            }
+        }
+    }
+
+    return rawUrl;
+}
+
 const builder = new addonBuilder({
     id: "org.stremio.nuvio.om019",
     // bump version whenever manifest/providers change so clients reload
@@ -230,15 +253,8 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
     app.get('/proxy', async (req, res) => {
         try {
-            const targetUrl = req.query.url && decodeURIComponent(req.query.url);
+            let targetUrl = req.query.url && decodeURIComponent(req.query.url);
             if (!targetUrl) return res.status(400).send('missing url');
-            const targetHost = (() => {
-                try {
-                    return new URL(targetUrl).host;
-                } catch (_error) {
-                    return 'invalid-url';
-                }
-            })();
             let headers = {};
             if (req.query.headers) {
                 try {
@@ -247,6 +263,16 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                     console.error('proxy: failed to parse headers', e.message);
                 }
             }
+
+            targetUrl = normalizeProxyTarget(targetUrl, headers);
+
+            const targetHost = (() => {
+                try {
+                    return new URL(targetUrl).host;
+                } catch (_error) {
+                    return 'invalid-url';
+                }
+            })();
 
             const upstreamHeaders = {
                 ...headers,
