@@ -424,8 +424,13 @@ function getStreams(tmdbId, mediaType, seasonNum, episodeNum) {
         allStreams.push(...sharedStreams);
       }
       allStreams.sort((a, b) => getQualityValue(b.quality) - getQualityValue(a.quality));
-      console.log(`[Castle] Total streams found: ${allStreams.length}`);
-      return allStreams;
+      const bestStream = allStreams[0] ? [{
+        ...allStreams[0],
+        name: allStreams[0].name.includes('Castle') ? allStreams[0].name.replace(/\s*-\s*.+$/, '') : 'Castle',
+        quality: 'Auto'
+      }] : [];
+      console.log(`[Castle] Total streams found: ${allStreams.length}, returning ${bestStream.length}`);
+      return bestStream;
     } catch (error) {
       console.error(`[Castle] Error: ${error.message}`);
       return [];

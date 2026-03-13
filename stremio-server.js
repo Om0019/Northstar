@@ -109,6 +109,25 @@ function normalizeProxyTarget(rawUrl, headers = {}) {
     return rawUrl;
 }
 
+function streamPriority(stream) {
+    switch (stream.provider) {
+        case 'netmirror':
+            return 300;
+        case 'webstreamer-latino':
+            return 200;
+        case 'vidlink':
+            return 120;
+        case 'vixsrc':
+            return 110;
+        case 'yflix':
+            return 100;
+        case 'castle':
+            return -100;
+        default:
+            return 0;
+    }
+}
+
 const builder = new addonBuilder({
     id: "org.stremio.nuvio.om019",
     // bump version whenever manifest/providers change so clients reload
@@ -146,6 +165,13 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     const streams = (Array.isArray(results) ? results.flat() : [])
         .filter(s => s && s.url)
+        .sort((a, b) => {
+            const priorityDiff = streamPriority(b) - streamPriority(a);
+            if (priorityDiff !== 0) {
+                return priorityDiff;
+            }
+            return (a.name || '').localeCompare(b.name || '');
+        })
         .map(s => {
             const providerHeaders = s.headers || {};
             

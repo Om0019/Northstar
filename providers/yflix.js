@@ -311,18 +311,26 @@ function runStreamFetch(eid, title, year, mediaType, seasonNum, episodeNum, rid)
         });
         logRid(rid, `streams: deduped`, { count: dedupedStreams.length });
 
-        // Convert to Nuvio format
-        const nuvioStreams = dedupedStreams.map(stream => ({
-          name: `YFlix ${stream.serverType || 'Server'} - ${stream.quality || 'Unknown'}`,
+        const qualityOrder = (quality) => {
+          const match = String(quality || '').match(/(\d{3,4})p/i);
+          return match ? parseInt(match[1], 10) : /adaptive/i.test(String(quality || '')) ? 9999 : 0;
+        };
+
+        dedupedStreams.sort((a, b) => qualityOrder(b.quality) - qualityOrder(a.quality));
+        const preferred = dedupedStreams.find(stream => stream.masterUrl || stream.type === 'hls') || dedupedStreams[0];
+        if (!preferred) {
+          return [];
+        }
+
+        return [{
+          name: 'YFlix',
           title: `${title}${year ? ` (${year})` : ''}${mediaType === 'tv' && seasonNum && episodeNum ? ` S${seasonNum}E${episodeNum}` : ''}`,
-          url: stream.url,
-          quality: stream.quality || 'Unknown',
+          url: preferred.masterUrl || preferred.url,
+          quality: 'Auto',
           size: 'Unknown',
           headers: HEADERS,
           provider: 'yflix'
-        }));
-
-        return nuvioStreams;
+        }];
       });
     });
 }
