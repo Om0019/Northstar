@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-13T07:02:28.868Z
+ * Generated: 2026-03-13T10:30:32.714Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -92,9 +92,11 @@ var DEFAULT_HEADERS = {
 var SOURCE_BASES = {
   cuevana: "https://ww1.cuevana3.is",
   cinehdplus: "https://cinehdplus.gratis",
+  cinecalidad: "https://www.cinecalidad.am",
   homecine: "https://www3.homecine.to",
   verhdlink: "https://verhdlink.cam",
-  tioplus: "https://tioplus.app"
+  tioplus: "https://tioplus.app",
+  verpeliculasultra: "https://verpeliculasultra.com"
 };
 
 // src/webstreamer-latino/http.js
@@ -357,15 +359,19 @@ function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   return __async(this, null, function* () {
     yield Promise.allSettled([
       prewarmSource(SOURCE_BASES.cuevana),
+      prewarmSource(SOURCE_BASES.cinecalidad),
       prewarmSource(SOURCE_BASES.verhdlink),
-      prewarmSource(SOURCE_BASES.tioplus)
+      prewarmSource(SOURCE_BASES.tioplus),
+      prewarmSource(SOURCE_BASES.verpeliculasultra)
     ]);
     const tasks = [
       searchCuevana(tmdb, season, episode),
       searchCineHdPlus(tmdb, mediaType, season, episode),
+      searchCineCalidad(tmdb, mediaType),
       searchHomeCine(tmdb, season, episode),
       searchVerHdLink(tmdb, mediaType),
-      searchTioPlus(tmdb, mediaType)
+      searchTioPlus(tmdb, mediaType),
+      searchVerPeliculasUltra(tmdb, mediaType)
     ];
     const settled = yield Promise.allSettled(tasks);
     return settled.flatMap((result) => {
@@ -504,6 +510,45 @@ function searchCineHdPlus(tmdb, mediaType, season, episode) {
     return results;
   });
 }
+function searchCineCalidad(tmdb, mediaType) {
+  return __async(this, null, function* () {
+    if (mediaType !== "movie") {
+      return [];
+    }
+    const candidates = [tmdb.title, tmdb.originalTitle].filter(Boolean);
+    let pageUrl = null;
+    for (const candidate of candidates) {
+      const resultUrl = yield findCineCalidadMovie(candidate, tmdb.year);
+      if (resultUrl) {
+        pageUrl = resultUrl;
+        break;
+      }
+    }
+    if (!pageUrl) {
+      return [];
+    }
+    const html = yield fetchText(pageUrl, {
+      headers: { Referer: SOURCE_BASES.cinecalidad }
+    });
+    const $ = import_cheerio_without_node_native.default.load(html);
+    const results = [];
+    $("#playeroptionsul li[data-option]").each((_, el) => {
+      const rawUrl = ($(el).attr("data-option") || "").trim();
+      if (!rawUrl || /youtube\.com\/embed/i.test(rawUrl)) {
+        return;
+      }
+      results.push(__spreadProps(__spreadValues({
+        source: "Cinecalidad"
+      }, languageMeta("mx")), {
+        title: buildTitle(tmdb),
+        url: rawUrl.replace(/^(https:)?\/\//, "https://"),
+        referer: pageUrl,
+        headers: { Referer: pageUrl }
+      }));
+    });
+    return results;
+  });
+}
 function searchHomeCine(tmdb, season, episode) {
   return __async(this, null, function* () {
     const candidateNames = [tmdb.title, tmdb.originalTitle].filter(Boolean);
@@ -617,6 +662,40 @@ function searchVerHdLink(tmdb, mediaType) {
     return results;
   });
 }
+function findCineCalidadMovie(title, year) {
+  return __async(this, null, function* () {
+    const searchUrl = `${SOURCE_BASES.cinecalidad}/?s=${encodeURIComponent(title)}`;
+    const html = yield fetchText(searchUrl, {
+      headers: { Referer: SOURCE_BASES.cinecalidad }
+    });
+    const $ = import_cheerio_without_node_native.default.load(html);
+    const targetNorm = normalizeTitle(title);
+    let best = null;
+    $("#archive-content article.item.movies").each((_, el) => {
+      const href = $(el).find('a[href*="/ver-pelicula/"]').first().attr("href");
+      const rawTitle = $(el).find(".in_title").first().text().trim();
+      if (!href || !rawTitle) {
+        return;
+      }
+      let score = 0;
+      const norm = normalizeTitle(rawTitle);
+      if (norm === targetNorm) {
+        score += 10;
+      }
+      if (norm.includes(targetNorm) || targetNorm.includes(norm)) {
+        score += 5;
+      }
+      const yearText = $(el).find(".home_post_content p").eq(1).text().trim();
+      if (year && yearText === year) {
+        score += 4;
+      }
+      if (!best || score > best.score) {
+        best = { href, score };
+      }
+    });
+    return best && best.score >= 5 ? best.href : null;
+  });
+}
 function searchTioPlus(tmdb, mediaType) {
   return __async(this, null, function* () {
     if (mediaType !== "movie") {
@@ -665,6 +744,86 @@ function searchTioPlus(tmdb, mediaType) {
     }
     const resolved = yield Promise.allSettled(results.map(resolveTioPlusPlayer));
     return resolved.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
+  });
+}
+function searchVerPeliculasUltra(tmdb, mediaType) {
+  return __async(this, null, function* () {
+    if (mediaType !== "movie") {
+      return [];
+    }
+    const candidates = [tmdb.title, tmdb.originalTitle].filter(Boolean);
+    let pageUrl = null;
+    for (const candidate of candidates) {
+      const resultUrl = yield findVerPeliculasUltraMovie(candidate, tmdb.year);
+      if (resultUrl) {
+        pageUrl = resultUrl;
+        break;
+      }
+    }
+    if (!pageUrl) {
+      return [];
+    }
+    const html = yield fetchText(pageUrl, {
+      headers: { Referer: SOURCE_BASES.verpeliculasultra }
+    });
+    const $ = import_cheerio_without_node_native.default.load(html);
+    const results = [];
+    $("#ts21 .play-btn-cont[data-src], #ts2 .play-btn-cont[data-src]").each((_, el) => {
+      const rawUrl = ($(el).attr("data-src") || "").trim();
+      if (!rawUrl) {
+        return;
+      }
+      results.push(__spreadProps(__spreadValues({
+        source: "VerPeliculasUltra"
+      }, languageMeta("mx")), {
+        title: buildTitle(tmdb),
+        url: rawUrl.replace(/^(https:)?\/\//, "https://"),
+        referer: pageUrl,
+        headers: { Referer: pageUrl }
+      }));
+    });
+    return results;
+  });
+}
+function findVerPeliculasUltraMovie(title, year) {
+  return __async(this, null, function* () {
+    const searchUrl = `${SOURCE_BASES.verpeliculasultra}/index.php?do=search&subaction=search&story=${encodeURIComponent(title)}`;
+    const html = yield fetchText(searchUrl, {
+      headers: {
+        Referer: SOURCE_BASES.verpeliculasultra,
+        "Content-Type": "application/x-www-form-urlencoded"
+      }
+    });
+    const $ = import_cheerio_without_node_native.default.load(html);
+    const targetNorm = normalizeTitle(title);
+    let best = null;
+    $('a[href$=".html"][title]').each((_, el) => {
+      const href = $(el).attr("href");
+      const rawTitle = ($(el).attr("title") || $(el).text() || "").trim();
+      if (!href || !rawTitle) {
+        return;
+      }
+      let score = 0;
+      const norm = normalizeTitle(rawTitle);
+      if (norm === targetNorm) {
+        score += 10;
+      }
+      if (norm.includes(targetNorm) || targetNorm.includes(norm)) {
+        score += 5;
+      }
+      const article = $(el).closest("article, .shortstory, .base.shortstory, li, div");
+      const yearText = article.text().match(/\b(19|20)\d{2}\b/);
+      if (year && yearText && yearText[0] === year) {
+        score += 4;
+      }
+      if (/serie|temporada|cap[ií]tulo/i.test(rawTitle)) {
+        score -= 5;
+      }
+      if (!best || score > best.score) {
+        best = { href, score };
+      }
+    });
+    return best && best.score >= 5 ? new URL(best.href, SOURCE_BASES.verpeliculasultra).href : null;
   });
 }
 function findTioPlusMovie(title, year) {
@@ -738,6 +897,7 @@ function resolveTioPlusPlayer(result) {
 
 // src/webstreamer-latino/extractors.js
 var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-native"));
+var import_crypto_js = __toESM(require("crypto-js"));
 var SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === "production";
 function absoluteUrl(rawUrl, origin) {
   return new URL(rawUrl.replace(/^\/\//, "https://"), origin).href;
@@ -827,6 +987,9 @@ function resolveOne(result) {
       if (/waaw|vidora/i.test(host)) {
         return resolveVidora(result, url);
       }
+      if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
+        return resolveStrp2p(result, url);
+      }
       if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
         return resolveStreamEmbed(result, url);
       }
@@ -860,6 +1023,8 @@ function inferPlayerFromUrl(url) {
     return "Fastream";
   if (value.includes("waaw") || value.includes("vidora"))
     return "Vidora";
+  if (value.includes("strp2p") || value.includes("4meplayer") || value.includes("upns.pro") || value.includes("p2pplay"))
+    return "StrP2P";
   if (value.includes("gxplayer") || value.includes("bullstream") || value.includes("mp4player"))
     return "StreamEmbed";
   if (value.includes("vidsrc") || value.includes("vsrc"))
@@ -878,6 +1043,8 @@ function playerRank(player) {
       return 70;
     case "Vidora":
       return 60;
+    case "StrP2P":
+      return 55;
     case "StreamEmbed":
       return 50;
     case "Mixdrop":
@@ -1032,10 +1199,10 @@ function resolveFilelions(result, url) {
       return [];
     }
     const playlistUrl = linksMatch[1].replace(/\\\//g, "/");
-    const title = import_cheerio_without_node_native2.default.load(unpacked)("meta[name=\"description\"]").attr("content") || result.title;
+    const title = import_cheerio_without_node_native2.default.load(unpacked)('meta[name="description"]').attr("content") || result.title;
     const streamHeaders = {
-      Referer: (page == null ? void 0 : page.url) || url.href,
-      Origin: new URL((page == null ? void 0 : page.url) || url.href).origin
+      Referer: page.url || url.href,
+      Origin: new URL(page.url || url.href).origin
     };
     return [buildStream(result, {
       title,
@@ -1065,8 +1232,8 @@ function resolveEmturbovid(result, url) {
     const playlistUrl = playlistMatch[1].replace(/\\\//g, "/");
     const title = import_cheerio_without_node_native2.default.load(html)("title").text().trim() || result.title;
     const streamHeaders = {
-      Referer: (page == null ? void 0 : page.url) || url.href,
-      Origin: new URL((page == null ? void 0 : page.url) || url.href).origin
+      Referer: page.url || url.href,
+      Origin: new URL(page.url || url.href).origin
     };
     return [buildStream(result, {
       title,
@@ -1098,6 +1265,54 @@ function resolveCuevanaPlayer(result, url) {
       referer: url.href,
       headers: { Referer: url.href }
     }));
+  });
+}
+function resolveStrp2p(result, url) {
+  return __async(this, null, function* () {
+    if (!url.hash || url.hash.length < 2) {
+      console.log(`[WebstreamerLatino] StrP2P miss: ${url.href}`);
+      return [];
+    }
+    const apiUrl = new URL(`/api/v1/video?id=${encodeURIComponent(url.hash.slice(1))}`, url.origin);
+    const headers = {
+      Origin: url.origin,
+      Referer: `${url.origin}/`,
+      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    };
+    const hexData = yield fetchText(apiUrl.href, { headers }).catch(() => null);
+    if (!hexData) {
+      console.log(`[WebstreamerLatino] StrP2P miss: ${url.href}`);
+      return [];
+    }
+    try {
+      const encrypted = import_crypto_js.default.enc.Hex.parse(hexData.trim().slice(0, -1));
+      const key = import_crypto_js.default.enc.Hex.parse("6b69656d7469656e6d75613931316361");
+      const iv = import_crypto_js.default.enc.Hex.parse("313233343536373839306f6975797472");
+      const decrypted = import_crypto_js.default.AES.decrypt(
+        { ciphertext: encrypted },
+        key,
+        { iv, mode: import_crypto_js.default.mode.CBC, padding: import_crypto_js.default.pad.Pkcs7 }
+      ).toString(import_crypto_js.default.enc.Utf8);
+      const { source, title } = JSON.parse(decrypted);
+      if (!source) {
+        console.log(`[WebstreamerLatino] StrP2P parse miss: ${url.href}`);
+        return [];
+      }
+      const playlistUrl = new URL(source, url.origin);
+      const height = yield guessHeightFromPlaylist(playlistUrl.href, headers).catch(() => null);
+      return [
+        buildStream(result, {
+          url: playlistUrl.href,
+          title,
+          quality: height ? `${height}p` : "Auto",
+          player: "StrP2P",
+          headers
+        })
+      ];
+    } catch (_error) {
+      console.log(`[WebstreamerLatino] StrP2P parse miss: ${url.href}`);
+      return [];
+    }
   });
 }
 function resolveDoodStream(result, url) {

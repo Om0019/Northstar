@@ -1,6 +1,9 @@
 import cheerio from 'cheerio-without-node-native';
+import CryptoJS from 'crypto-js';
 import { fetchPage, fetchText } from './http.js';
 import { extractPackedUrl, guessHeightFromPlaylist, parseQuality, qualityRank, uniqueBy, unpackPacker } from './utils.js';
+
+const SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === 'production';
 
 function absoluteUrl(rawUrl, origin) {
   return new URL(rawUrl.replace(/^\/\//, 'https://'), origin).href;
@@ -77,6 +80,18 @@ async function resolveOne(result) {
       return resolveMixdrop(result, url);
     }
 
+    if (/filelions|vidhide/i.test(host)) {
+      return resolveFilelions(result, url);
+    }
+
+    if (/emturbovid|turbovidhls|turboviplay/i.test(host)) {
+      return resolveEmturbovid(result, url);
+    }
+
+    if (/player\.cuevana3\.eu/i.test(host)) {
+      return resolveCuevanaPlayer(result, url);
+    }
+
     if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
       return resolveDoodStream(result, url);
     }
@@ -91,6 +106,10 @@ async function resolveOne(result) {
 
     if (/waaw|vidora/i.test(host)) {
       return resolveVidora(result, url);
+    }
+
+    if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
+      return resolveStrp2p(result, url);
     }
 
     if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
@@ -114,10 +133,13 @@ function inferPlayerFromUrl(url) {
   if (value.includes('supervideo')) return 'SuperVideo';
   if (value.includes('dropload') || value.includes('dr0pstream')) return 'Dropload';
   if (value.includes('mixdrop') || value.includes('mixdrp') || value.includes('mixdroop') || value.includes('m1xdrop')) return 'Mixdrop';
+  if (value.includes('filelions') || value.includes('vidhide')) return 'FileLions';
+  if (value.includes('emturbovid') || value.includes('turbovidhls') || value.includes('turboviplay')) return 'Emturbovid';
   if (value.includes('dood') || value.includes('ds2play') || value.includes('vidply') || value.includes('doply')) return 'DoodStream';
   if (value.includes('streamtape') || value.includes('streamta.pe') || value.includes('strcloud')) return 'Streamtape';
   if (value.includes('fastream')) return 'Fastream';
   if (value.includes('waaw') || value.includes('vidora')) return 'Vidora';
+  if (value.includes('strp2p') || value.includes('4meplayer') || value.includes('upns.pro') || value.includes('p2pplay')) return 'StrP2P';
   if (value.includes('gxplayer') || value.includes('bullstream') || value.includes('mp4player')) return 'StreamEmbed';
   if (value.includes('vidsrc') || value.includes('vsrc')) return 'VidSrc';
 
@@ -136,10 +158,16 @@ function playerRank(player) {
       return 70;
     case 'Vidora':
       return 60;
+    case 'StrP2P':
+      return 55;
     case 'StreamEmbed':
       return 50;
     case 'Mixdrop':
       return 40;
+    case 'FileLions':
+      return 38;
+    case 'Emturbovid':
+      return 36;
     case 'DoodStream':
       return 30;
     case 'Streamtape':
@@ -274,7 +302,7 @@ async function resolveMixdrop(result, url) {
     streamHeaders.Cookie = cookieHeader;
   }
 
-  const isPlayable = await validateDirectMedia(directUrl, streamHeaders);
+  const isPlayable = !SHOULD_VALIDATE_MEDIA || await validateDirectMedia(directUrl, streamHeaders);
   if (!isPlayable) {
     console.log(`[WebstreamerLatino] Mixdrop blocked: ${url.href}`);
     return [];
@@ -287,6 +315,166 @@ async function resolveMixdrop(result, url) {
     headers: streamHeaders,
     player: 'Mixdrop',
   })];
+}
+
+async function resolveFilelions(result, url) {
+  const headers = {
+    ...(result.headers || {}),
+    Referer: result.referer || 'https://ww1.cuevana3.is/',
+  };
+  const page = await fetchPage(url.href, { headers }).catch(() => null);
+  if (!page?.text) {
+    console.log(`[WebstreamerLatino] FileLions miss: ${url.href}`);
+    return [];
+  }
+
+  const unpacked = unpackPacker(page.text);
+  const linksMatch =
+    unpacked.match(/var\s+links\s*=\s*\{[^}]*"hls2"\s*:\s*"([^"]+)"/i) ||
+    unpacked.match(/"hls2"\s*:\s*"([^"]+)"/i) ||
+    unpacked.match(/file:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/i);
+
+  if (!linksMatch) {
+    console.log(`[WebstreamerLatino] FileLions parse miss: ${url.href}`);
+    return [];
+  }
+
+  const playlistUrl = linksMatch[1].replace(/\\\//g, '/');
+  const title = cheerio.load(unpacked)('meta[name="description"]').attr('content') || result.title;
+  const streamHeaders = {
+    Referer: page.url || url.href,
+    Origin: new URL(page.url || url.href).origin,
+  };
+
+  return [buildStream(result, {
+    title,
+    url: playlistUrl,
+    quality: 'Auto',
+    headers: streamHeaders,
+    player: 'FileLions',
+  })];
+}
+
+async function resolveEmturbovid(result, url) {
+  const headers = {
+    ...(result.headers || {}),
+    Referer: result.referer || 'https://tioplus.app/',
+  };
+  const page = await fetchPage(url.href, { headers }).catch(() => null);
+  const html = page?.text;
+  if (!html) {
+    console.log(`[WebstreamerLatino] Emturbovid miss: ${url.href}`);
+    return [];
+  }
+
+  const playlistMatch =
+    html.match(/data-hash="([^"]+\.m3u8[^"]*)"/i) ||
+    html.match(/["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i);
+
+  if (!playlistMatch) {
+    console.log(`[WebstreamerLatino] Emturbovid parse miss: ${url.href}`);
+    return [];
+  }
+
+  const playlistUrl = playlistMatch[1].replace(/\\\//g, '/');
+  const title = cheerio.load(html)('title').text().trim() || result.title;
+  const streamHeaders = {
+    Referer: page.url || url.href,
+    Origin: new URL(page.url || url.href).origin,
+  };
+
+  return [buildStream(result, {
+    title,
+    url: playlistUrl,
+    quality: 'Auto',
+    headers: streamHeaders,
+    player: 'Emturbovid',
+  })];
+}
+
+async function resolveCuevanaPlayer(result, url) {
+  const html = await fetchText(url.href, {
+    headers: {
+      ...(result.headers || {}),
+      Referer: result.referer || 'https://ww1.cuevana3.is/',
+    },
+  }).catch(() => null);
+
+  if (!html) {
+    console.log(`[WebstreamerLatino] Cuevana player miss: ${url.href}`);
+    return [];
+  }
+
+  const targetMatch =
+    html.match(/var\s+url\s*=\s*'([^']+)'/i) ||
+    html.match(/var\s+url\s*=\s*"([^"]+)"/i) ||
+    html.match(/<iframe[^>]+src="([^"]+)"/i) ||
+    html.match(/<iframe[^>]+src='([^']+)'/i);
+
+  if (!targetMatch) {
+    console.log(`[WebstreamerLatino] Cuevana player parse miss: ${url.href}`);
+    return [];
+  }
+
+  return resolveOne({
+    ...result,
+    url: absoluteUrl(targetMatch[1], url.origin),
+    referer: url.href,
+    headers: { Referer: url.href },
+  });
+}
+
+async function resolveStrp2p(result, url) {
+  if (!url.hash || url.hash.length < 2) {
+    console.log(`[WebstreamerLatino] StrP2P miss: ${url.href}`);
+    return [];
+  }
+
+  const apiUrl = new URL(`/api/v1/video?id=${encodeURIComponent(url.hash.slice(1))}`, url.origin);
+  const headers = {
+    Origin: url.origin,
+    Referer: `${url.origin}/`,
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  };
+
+  const hexData = await fetchText(apiUrl.href, { headers }).catch(() => null);
+  if (!hexData) {
+    console.log(`[WebstreamerLatino] StrP2P miss: ${url.href}`);
+    return [];
+  }
+
+  try {
+    const encrypted = CryptoJS.enc.Hex.parse(hexData.trim().slice(0, -1));
+    const key = CryptoJS.enc.Hex.parse('6b69656d7469656e6d75613931316361');
+    const iv = CryptoJS.enc.Hex.parse('313233343536373839306f6975797472');
+    const decrypted = CryptoJS.AES.decrypt(
+      { ciphertext: encrypted },
+      key,
+      { iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+    ).toString(CryptoJS.enc.Utf8);
+    const { source, title } = JSON.parse(decrypted);
+
+    if (!source) {
+      console.log(`[WebstreamerLatino] StrP2P parse miss: ${url.href}`);
+      return [];
+    }
+
+    const playlistUrl = new URL(source, url.origin);
+    const height = await guessHeightFromPlaylist(playlistUrl.href, headers).catch(() => null);
+
+    return [
+      buildStream(result, {
+        url: playlistUrl.href,
+        title,
+        quality: height ? `${height}p` : 'Auto',
+        player: 'StrP2P',
+        headers,
+      }),
+    ];
+  } catch (_error) {
+    console.log(`[WebstreamerLatino] StrP2P parse miss: ${url.href}`);
+    return [];
+  }
 }
 
 async function resolveDoodStream(result, url) {
@@ -343,7 +531,7 @@ async function resolveDoodStream(result, url) {
   }
   directUrl.searchParams.set('expiry', String(Date.now()));
   const streamHeaders = { Referer: normalized.href };
-  const isPlayable = await validateDirectMedia(directUrl.href, streamHeaders);
+  const isPlayable = !SHOULD_VALIDATE_MEDIA || await validateDirectMedia(directUrl.href, streamHeaders);
   if (!isPlayable) {
     console.log(`[WebstreamerLatino] Dood blocked: ${normalized.href}`);
     return [];
