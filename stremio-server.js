@@ -6,7 +6,15 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const axios = require("axios");
 const express = require('express'); // used later when attaching proxy route
 
-const TIMEOUT_MS = 15000;
+const DEFAULT_TIMEOUT_MS = 7000;
+const PROVIDER_TIMEOUT_MS = {
+    netmirror: 9000,
+    'webstreamer-latino': 8000,
+    vidlink: 5000,
+    vixsrc: 5000,
+    yflix: 5000,
+    castle: 5000
+};
 const IS_PROD = process.env.NODE_ENV === 'production';
 const PUBLIC_ADDON_BASE = (process.env.ADDON_PUBLIC_URL || '').replace(/\/$/, '');
 const DEFAULT_LOGO_URL = 'https://raw.githubusercontent.com/Om0019/Northstar/refs/heads/main/Assets/image.png';
@@ -15,12 +23,37 @@ const addonConfig = require('./addon.config.json');
 const providers = [];
 const pDir = path.join(__dirname, 'providers');
 const activeProviders = new Set(addonConfig.activeProviders || []);
+const cinemetaCache = new Map();
+const streamCache = new Map();
+const CINEMETA_TTL_MS = 30 * 60 * 1000;
+const STREAM_CACHE_TTL_MS = 60 * 1000;
 
 function withTimeout(promise, ms, fallback) {
     return Promise.race([
         promise,
         new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
     ]);
+}
+
+function getCacheEntry(cache, key) {
+    const entry = cache.get(key);
+    if (!entry) {
+        return null;
+    }
+
+    if (entry.expiresAt <= Date.now()) {
+        cache.delete(key);
+        return null;
+    }
+
+    return entry.value;
+}
+
+function setCacheEntry(cache, key, value, ttlMs) {
+    cache.set(key, {
+        value,
+        expiresAt: Date.now() + ttlMs
+    });
 }
 
 if (fs.existsSync(pDir)) {
@@ -96,6 +129,15 @@ function mediaflowProxyWrap(req, url, headers) {
     const base = requestBase(req);
     const proxyPath = `/proxy/hls/manifest.m3u8?url=${encodedUrl}&headers=${encodedHeaders}`;
     return base ? `${base}${proxyPath}` : proxyPath;
+}
+
+function ensureAddonAbsolute(url) {
+    if (!url || !url.startsWith('/')) {
+        return url;
+    }
+
+    const base = requestBase();
+    return base ? `${base}${url}` : url;
 }
 
 function normalizeProxyTarget(rawUrl, headers = {}) {
@@ -239,13 +281,30 @@ builder.defineStreamHandler(async ({ type, id }) => {
     if (!IS_PROD) {
         console.log('[stream handler] LAST_HOST =', LAST_HOST, 'ADDON_BASE =', ADDON_BASE, 'PUBLIC_ADDON_BASE =', PUBLIC_ADDON_BASE);
     }
+    const cacheKey = `${type}:${id}`;
+    const cachedStreams = getCacheEntry(streamCache, cacheKey);
+    if (cachedStreams) {
+        if (!IS_PROD) {
+            console.log(`[stream handler] cache hit for ${cacheKey}`);
+        }
+        return { streams: cachedStreams };
+    }
+
     const [imdbId, season, episode] = id.split(":");
-    let tmdbId = null;
-    try {
-        const { data } = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`);
-        tmdbId = data.meta.moviedb_id;
-    } catch (e) {}
-    
+    const cinemetaKey = `${type}:${imdbId}`;
+    let tmdbId = getCacheEntry(cinemetaCache, cinemetaKey);
+    if (!tmdbId) {
+        try {
+            const { data } = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`, {
+                timeout: 5000
+            });
+            tmdbId = data.meta.moviedb_id;
+            if (tmdbId) {
+                setCacheEntry(cinemetaCache, cinemetaKey, tmdbId, CINEMETA_TTL_MS);
+            }
+        } catch (_e) {}
+    }
+
     if (!tmdbId) return { streams: [] };
 
     // Convert series to tv
@@ -253,7 +312,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
     const results = await Promise.all(
         providers.map((provider) => withTimeout(
             Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode)).catch(() => []),
-            TIMEOUT_MS,
+            PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS,
             []
         ))
     ).catch(() => []);
@@ -278,7 +337,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
             // route the stream through our local proxy so that headers/cookies are
             // consistently applied even for playlist/segment requests
-            const proxiedUrl = proxyWrap(s.url, finalHeaders);
+            const proxiedUrl = s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
+                ? ensureAddonAbsolute(s.url)
+                : proxyWrap(s.url, finalHeaders);
 
             return {
                 name: s.name || "Source",
@@ -292,6 +353,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         });
 
     console.log(`Sending ${streams.length} streams`);
+    setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
     return { streams };
 });
 
