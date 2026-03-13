@@ -58,6 +58,22 @@ export async function resolveLatinoStreams(results) {
   return unique.map(({ qualityRank: _qualityRank, ...stream }) => stream);
 }
 
+export async function resolveLatinoMediaflowTarget(targetUrl, headers = {}, options = {}) {
+  const player = options.player || inferPlayerFromUrl(targetUrl);
+  const result = {
+    source: options.source || 'MediaFlow',
+    language: options.language || 'Latino',
+    title: options.title || 'Latino Stream',
+    url: targetUrl,
+    referer: options.referer || headers.Referer || headers.referer || targetUrl,
+    headers,
+    player,
+  };
+
+  const streams = await resolveOne(result);
+  return streams[0] || null;
+}
+
 async function resolveOne(result) {
   try {
     const url = new URL(result.url, result.referer || 'https://example.com');

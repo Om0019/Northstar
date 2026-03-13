@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns').promises;
+const { pathToFileURL } = require('url');
 const { addonBuilder } = require("stremio-addon-sdk");
 const axios = require("axios");
 const express = require('express'); // used later when attaching proxy route
@@ -57,6 +58,7 @@ console.log("Loaded providers:", providers.map(p => p.name));
 let ADDON_BASE = ''; // populated later
 let LAST_HOST = '';    // updated by middleware for each incoming request
 const dnsReachabilityCache = new Map();
+let latinoMediaflowModulePromise = null;
 
 function requestBase(req) {
     if (PUBLIC_ADDON_BASE) {
@@ -85,6 +87,14 @@ function proxyWrap(url, headers) {
     const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
     const proxyPath = `/proxy?url=${encodedUrl}&headers=${encodedHeaders}`;
     const base = requestBase();
+    return base ? `${base}${proxyPath}` : proxyPath;
+}
+
+function mediaflowProxyWrap(req, url, headers) {
+    const encodedUrl = encodeURIComponent(url);
+    const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
+    const base = requestBase(req);
+    const proxyPath = `/proxy/hls/manifest.m3u8?url=${encodedUrl}&headers=${encodedHeaders}`;
     return base ? `${base}${proxyPath}` : proxyPath;
 }
 
@@ -169,6 +179,29 @@ async function pruneDeadHlsVariants(playlistText, baseUrl) {
     }
 
     return kept.join('\n');
+}
+
+async function loadLatinoMediaflowResolver() {
+    if (!latinoMediaflowModulePromise) {
+        const modulePath = path.join(__dirname, 'src', 'webstreamer-latino', 'extractors.js');
+        latinoMediaflowModulePromise = import(pathToFileURL(modulePath).href);
+    }
+
+    const module = await latinoMediaflowModulePromise;
+    return module.resolveLatinoMediaflowTarget;
+}
+
+function extractMediaflowHeaders(query) {
+    const headers = {};
+    Object.entries(query || {}).forEach(([key, value]) => {
+        if (!key.startsWith('h_') || value == null) {
+            return;
+        }
+
+        const headerName = key.slice(2).replace(/_/g, '-');
+        headers[headerName] = String(value);
+    });
+    return headers;
 }
 
 function streamPriority(stream) {
@@ -344,7 +377,7 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
     const app = server._events.request;
 
-    app.get('/proxy', async (req, res) => {
+    const proxyHandler = async (req, res) => {
         try {
             let targetUrl = req.query.url && decodeURIComponent(req.query.url);
             if (!targetUrl) return res.status(400).send('missing url');
@@ -455,6 +488,49 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
         } catch (err) {
             console.error(`[proxy] error ${err && err.message}`);
             res.status(500).send('proxy error');
+        }
+    };
+
+    app.get('/proxy', proxyHandler);
+    app.get('/proxy/hls/manifest.m3u8', proxyHandler);
+
+    app.get('/extractor/video', async (req, res) => {
+        try {
+            const host = String(req.query.host || '').trim();
+            const rawTarget = req.query.d && decodeURIComponent(req.query.d);
+            if (!host || !rawTarget) {
+                return res.status(400).json({ error: 'missing host or d' });
+            }
+
+            const headers = extractMediaflowHeaders(req.query);
+            const resolveLatinoMediaflowTarget = await loadLatinoMediaflowResolver();
+            const stream = await resolveLatinoMediaflowTarget(rawTarget, headers, {
+                source: 'MediaFlow',
+                language: 'Latino',
+                title: host,
+                referer: headers.referer || headers.Referer || rawTarget,
+                player: host,
+            });
+
+            if (!stream || !stream.url) {
+                return res.status(404).json({ error: 'extractor could not resolve stream' });
+            }
+
+            const proxyUrl = mediaflowProxyWrap(req, stream.url, stream.headers || headers);
+
+            if (String(req.query.redirect_stream || '').toLowerCase() === 'true') {
+                return res.redirect(proxyUrl);
+            }
+
+            return res.json({
+                destination_url: stream.url,
+                request_headers: stream.headers || headers,
+                mediaflow_proxy_url: proxyUrl,
+                query_params: {},
+            });
+        } catch (err) {
+            console.error(`[extractor/video] error ${err && err.message}`);
+            return res.status(500).json({ error: 'extractor error' });
         }
     });
 });
