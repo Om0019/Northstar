@@ -738,6 +738,7 @@ function resolveTioPlusPlayer(result) {
 
 // src/webstreamer-latino/extractors.js
 var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-native"));
+var SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === "production";
 function absoluteUrl(rawUrl, origin) {
   return new URL(rawUrl.replace(/^\/\//, "https://"), origin).href;
 }
@@ -983,7 +984,7 @@ function resolveMixdrop(result, url) {
     if (cookieHeader) {
       streamHeaders.Cookie = cookieHeader;
     }
-    const isPlayable = yield validateDirectMedia(directUrl, streamHeaders);
+    const isPlayable = !SHOULD_VALIDATE_MEDIA || (yield validateDirectMedia(directUrl, streamHeaders));
     if (!isPlayable) {
       console.log(`[WebstreamerLatino] Mixdrop blocked: ${url.href}`);
       return [];
@@ -1042,7 +1043,7 @@ function resolveDoodStream(result, url) {
     }
     directUrl.searchParams.set("expiry", String(Date.now()));
     const streamHeaders = { Referer: normalized.href };
-    const isPlayable = yield validateDirectMedia(directUrl.href, streamHeaders);
+    const isPlayable = !SHOULD_VALIDATE_MEDIA || (yield validateDirectMedia(directUrl.href, streamHeaders));
     if (!isPlayable) {
       console.log(`[WebstreamerLatino] Dood blocked: ${normalized.href}`);
       return [];
