@@ -228,6 +228,13 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
         try {
             const targetUrl = req.query.url && decodeURIComponent(req.query.url);
             if (!targetUrl) return res.status(400).send('missing url');
+            const targetHost = (() => {
+                try {
+                    return new URL(targetUrl).host;
+                } catch (_error) {
+                    return 'invalid-url';
+                }
+            })();
             let headers = {};
             if (req.query.headers) {
                 try {
@@ -249,6 +256,8 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                 timeout: 10000,
                 validateStatus: () => true
             });
+
+            console.log(`[proxy] ${req.method} ${targetHost} -> ${resp.status} ${resp.headers['content-type'] || 'unknown'}`);
 
             // copy status and headers
             res.status(resp.status);
@@ -303,7 +312,7 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                 resp.data.pipe(res);
             }
         } catch (err) {
-            console.error('proxy error', err && err.message);
+            console.error(`[proxy] error ${err && err.message}`);
             res.status(500).send('proxy error');
         }
     });
