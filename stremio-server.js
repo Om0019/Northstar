@@ -9,7 +9,7 @@ const express = require('express'); // used later when attaching proxy route
 const DEFAULT_TIMEOUT_MS = 7000;
 const PROVIDER_TIMEOUT_MS = {
     netmirror: 9000,
-    'webstreamer-latino': 15000,
+    'webstreamer-latino': 20000,
     vidlink: 5000,
     vixsrc: 5000,
     yflix: 5000,
