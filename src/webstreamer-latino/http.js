@@ -2,6 +2,9 @@ import axios from 'axios';
 import { DEFAULT_HEADERS } from './constants.js';
 
 const cookieJar = new Map();
+const pageCache = new Map();
+const pendingPageRequests = new Map();
+const PAGE_CACHE_TTL_MS = 2 * 60 * 1000;
 
 function mergeHeaders(headers) {
   return { ...DEFAULT_HEADERS, ...(headers || {}) };
@@ -47,6 +50,57 @@ function storeCookies(url, response) {
   }
 }
 
+function sortedHeaders(headers = {}) {
+  return Object.keys(headers)
+    .sort()
+    .reduce((acc, key) => {
+      acc[key] = headers[key];
+      return acc;
+    }, {});
+}
+
+function clonePage(page) {
+  return {
+    text: page.text,
+    url: page.url,
+    headers: { ...(page.headers || {}) },
+  };
+}
+
+function getCachedPage(key) {
+  const entry = pageCache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    pageCache.delete(key);
+    return null;
+  }
+
+  return clonePage(entry.value);
+}
+
+function setCachedPage(key, value) {
+  pageCache.set(key, {
+    value: clonePage(value),
+    expiresAt: Date.now() + PAGE_CACHE_TTL_MS,
+  });
+}
+
+function createPageCacheKey(url, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  if (method !== 'GET' || options.body || options._warmed) {
+    return null;
+  }
+
+  return JSON.stringify({
+    url,
+    method,
+    headers: sortedHeaders(options.headers || {}),
+  });
+}
+
 async function issueRequest(url, options = {}) {
   const cookieHeader = getCookieHeader(url);
   const navigationHeaders = {
@@ -89,26 +143,58 @@ async function warmHost(url, headers) {
 }
 
 export async function fetchPage(url, options = {}) {
-  let response = await issueRequest(url, options);
+  const cacheKey = createPageCacheKey(url, options);
+  if (cacheKey) {
+    const cached = getCachedPage(cacheKey);
+    if (cached) {
+      return cached;
+    }
 
-  if (response.status === 403 && !options._warmed) {
-    await warmHost(url, options.headers);
-    response = await issueRequest(url, { ...options, _warmed: true });
+    const pending = pendingPageRequests.get(cacheKey);
+    if (pending) {
+      return clonePage(await pending);
+    }
   }
 
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
-  }
-  const headers = {};
-  for (const [key, value] of Object.entries(response.headers || {})) {
-    headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+  const request = (async () => {
+    let response = await issueRequest(url, options);
+
+    if (response.status === 403 && !options._warmed) {
+      await warmHost(url, options.headers);
+      response = await issueRequest(url, { ...options, _warmed: true });
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
+    }
+    const headers = {};
+    for (const [key, value] of Object.entries(response.headers || {})) {
+      headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+    }
+
+    const page = {
+      text: typeof response.data === 'string' ? response.data : String(response.data || ''),
+      url: response.request?.res?.responseUrl || response.config?.url || url,
+      headers,
+    };
+
+    if (cacheKey) {
+      setCachedPage(cacheKey, page);
+    }
+
+    return page;
+  })();
+
+  if (!cacheKey) {
+    return request;
   }
 
-  return {
-    text: typeof response.data === 'string' ? response.data : String(response.data || ''),
-    url: response.request?.res?.responseUrl || response.config?.url || url,
-    headers,
-  };
+  pendingPageRequests.set(cacheKey, request);
+  try {
+    return clonePage(await request);
+  } finally {
+    pendingPageRequests.delete(cacheKey);
+  }
 }
 
 export async function fetchText(url, options = {}) {

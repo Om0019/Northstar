@@ -2,7 +2,45 @@ import cheerio from 'cheerio-without-node-native';
 import { SOURCE_BASES } from './constants.js';
 import { fetchPage, fetchText } from './http.js';
 import { buildEpisodeTag } from './tmdb.js';
-import { normalizeTitle } from './utils.js';
+import { normalizeTitle, uniqueBy } from './utils.js';
+
+const SOURCE_RESULTS_TTL_MS = 2 * 60 * 1000;
+const sourceResultsCache = new Map();
+const pendingSourceRequests = new Map();
+const prewarmCache = new Map();
+
+function getCachedValue(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+
+  return entry.value;
+}
+
+function setCachedValue(cache, key, value, ttlMs) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+}
+
+function sourceCacheKey(tmdb, season, episode) {
+  return JSON.stringify({
+    tmdbId: tmdb.tmdbId,
+    mediaType: tmdb.mediaType,
+    season: season || null,
+    episode: episode || null,
+    title: tmdb.title,
+    originalTitle: tmdb.originalTitle,
+    year: tmdb.year,
+  });
+}
 
 function languageMeta(kind) {
   return kind === 'mx'
@@ -19,43 +57,75 @@ function buildTitle(tmdb, season, episode) {
 }
 
 export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
-  await Promise.allSettled([
-    prewarmSource(SOURCE_BASES.cuevana),
-    prewarmSource(SOURCE_BASES.cinecalidad),
-    prewarmSource(SOURCE_BASES.verhdlink),
-    prewarmSource(SOURCE_BASES.tioplus),
-    prewarmSource(SOURCE_BASES.verpeliculasultra),
-  ]);
+  const cacheKey = sourceCacheKey(tmdb, season, episode);
+  const cached = getCachedValue(sourceResultsCache, cacheKey);
+  if (cached) {
+    return cached;
+  }
 
-  const tasks = [
-    searchCuevana(tmdb, season, episode),
-    searchCineHdPlus(tmdb, mediaType, season, episode),
-    searchCineCalidad(tmdb, mediaType, season, episode),
-    searchHomeCine(tmdb, season, episode),
-    searchVerHdLink(tmdb, mediaType),
-    searchTioPlus(tmdb, mediaType, season, episode),
-    searchVerPeliculasUltra(tmdb, mediaType),
-  ];
+  const pending = pendingSourceRequests.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
 
-  const settled = await Promise.allSettled(tasks);
+  const request = (async () => {
+    await Promise.allSettled([
+      prewarmSource(SOURCE_BASES.cuevana),
+      prewarmSource(SOURCE_BASES.cinecalidad),
+      prewarmSource(SOURCE_BASES.verhdlink),
+      prewarmSource(SOURCE_BASES.tioplus),
+      prewarmSource(SOURCE_BASES.verpeliculasultra),
+    ]);
 
-  return settled.flatMap((result) => {
-    if (result.status === 'fulfilled') {
-      return result.value;
-    }
+    const tasks = [
+      searchCuevana(tmdb, season, episode),
+      searchCineHdPlus(tmdb, mediaType, season, episode),
+      searchCineCalidad(tmdb, mediaType, season, episode),
+      searchHomeCine(tmdb, season, episode),
+      searchVerHdLink(tmdb, mediaType),
+      searchTioPlus(tmdb, mediaType, season, episode),
+      searchVerPeliculasUltra(tmdb, mediaType),
+    ];
 
-    console.error('[WebstreamerLatino] Source error:', result.reason ? result.reason.message : result.reason);
-    return [];
-  });
+    const settled = await Promise.allSettled(tasks);
+    const merged = settled.flatMap((result) => {
+      if (result.status === 'fulfilled') {
+        return result.value;
+      }
+
+      console.error('[WebstreamerLatino] Source error:', result.reason ? result.reason.message : result.reason);
+      return [];
+    });
+    const uniqueResults = uniqueBy(
+      merged,
+      (item) => `${item.url}|${item.referer || ''}|${JSON.stringify(item.headers || {})}`,
+    );
+
+    setCachedValue(sourceResultsCache, cacheKey, uniqueResults, SOURCE_RESULTS_TTL_MS);
+    return uniqueResults;
+  })();
+
+  pendingSourceRequests.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    pendingSourceRequests.delete(cacheKey);
+  }
 }
 
 async function prewarmSource(baseUrl) {
+  const cached = getCachedValue(prewarmCache, baseUrl);
+  if (cached) {
+    return cached;
+  }
+
   await fetchPage(baseUrl, {
     headers: {
       Referer: baseUrl,
       Origin: new URL(baseUrl).origin,
     },
   }).catch(() => null);
+  setCachedValue(prewarmCache, baseUrl, true, SOURCE_RESULTS_TTL_MS);
 }
 
 async function searchCuevana(tmdb, season, episode) {

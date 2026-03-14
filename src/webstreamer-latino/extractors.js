@@ -4,6 +4,67 @@ import { fetchPage, fetchText } from './http.js';
 import { extractPackedUrl, guessHeightFromPlaylist, parseQuality, qualityRank, uniqueBy, unpackPacker } from './utils.js';
 
 const SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === 'production';
+const RESOLVER_CONCURRENCY = 4;
+const RESOLVER_CACHE_TTL_MS = 3 * 60 * 1000;
+const HOST_FAILURE_TTL_MS = 90 * 1000;
+const resolverCache = new Map();
+const pendingResolverRequests = new Map();
+const hostFailureCooldowns = new Map();
+
+function getCachedValue(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+
+  return entry.value;
+}
+
+function setCachedValue(cache, key, value, ttlMs) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs,
+  });
+}
+
+function resultCacheKey(result) {
+  return JSON.stringify({
+    url: result.url,
+    referer: result.referer || '',
+    headers: result.headers || {},
+    source: result.source || '',
+    title: result.title || '',
+  });
+}
+
+function cloneStreams(streams) {
+  return streams.map((stream) => ({
+    ...stream,
+    headers: { ...(stream.headers || {}) },
+  }));
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
 
 function absoluteUrl(rawUrl, origin) {
   return new URL(rawUrl.replace(/^\/\//, 'https://'), origin).href;
@@ -27,12 +88,27 @@ function buildStream(result, extracted) {
 }
 
 export async function resolveLatinoStreams(results) {
-  results.forEach((result) => {
+  const uniqueResults = uniqueBy(
+    results,
+    (result) => `${result.url}|${result.referer || ''}|${JSON.stringify(result.headers || {})}`,
+  );
+
+  uniqueResults.forEach((result) => {
     const player = inferPlayerFromUrl(result.url);
     console.log(`[WebstreamerLatino] Candidate: ${result.source} -> ${result.url} -> ${player || 'unknown'}`);
   });
 
-  const settled = await Promise.allSettled(results.map((result) => resolveOne(result)));
+  if (uniqueResults.length !== results.length) {
+    console.log(`[WebstreamerLatino] Deduped candidates: ${results.length} -> ${uniqueResults.length}`);
+  }
+
+  const settled = await mapWithConcurrency(uniqueResults, RESOLVER_CONCURRENCY, async (result) => {
+    try {
+      return { status: 'fulfilled', value: await resolveOne(result) };
+    } catch (_error) {
+      return { status: 'rejected', value: [] };
+    }
+  });
   const streams = settled.flatMap((item) => {
     if (item.status === 'fulfilled') {
       return item.value;
@@ -75,75 +151,96 @@ export async function resolveLatinoMediaflowTarget(targetUrl, headers = {}, opti
 }
 
 async function resolveOne(result) {
+  const cacheKey = resultCacheKey(result);
+  const cached = getCachedValue(resolverCache, cacheKey);
+  if (cached) {
+    return cloneStreams(cached);
+  }
+
+  const pending = pendingResolverRequests.get(cacheKey);
+  if (pending) {
+    return cloneStreams(await pending);
+  }
+
+  const request = resolveOneUncached(result);
+  pendingResolverRequests.set(cacheKey, request);
+  try {
+    const resolved = await request;
+    if (resolved.length > 0) {
+      setCachedValue(resolverCache, cacheKey, resolved, RESOLVER_CACHE_TTL_MS);
+    }
+    return cloneStreams(resolved);
+  } finally {
+    pendingResolverRequests.delete(cacheKey);
+  }
+}
+
+async function resolveOneUncached(result) {
   try {
     const url = new URL(result.url, result.referer || 'https://example.com');
     const host = url.hostname;
+    const blockedUntil = getCachedValue(hostFailureCooldowns, host);
+
+    if (blockedUntil) {
+      console.log(`[WebstreamerLatino] Host cooldown active: ${host}`);
+      return [];
+    }
+
+    const startedAt = Date.now();
+    let streams = [];
 
     if (/\.(m3u8|mp4)(\?|$)/i.test(url.href)) {
-      return [buildStream(result, { url: url.href, player: inferPlayerFromUrl(url.href) })];
-    }
-
-    if (/supervideo/i.test(host)) {
+      streams = [buildStream(result, { url: url.href, player: inferPlayerFromUrl(url.href) })];
+    } else if (/supervideo/i.test(host)) {
       console.log(`[WebstreamerLatino] SuperVideo skipped: ${result.url}`);
-      return [];
-    }
-
-    if (/dropload|dr0pstream/i.test(host)) {
-      return resolveDropload(result, url);
-    }
-
-    if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
+      streams = [];
+    } else if (/dropload|dr0pstream/i.test(host)) {
+      streams = await resolveDropload(result, url);
+    } else if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
       console.log(`[WebstreamerLatino] Mixdrop skipped: ${result.url}`);
-      return [];
+      streams = [];
+    } else if (/filelions|vidhide/i.test(host)) {
+      streams = await resolveFilelions(result, url);
+    } else if (/emturbovid|turbovidhls|turboviplay/i.test(host)) {
+      streams = await resolveEmturbovid(result, url);
+    } else if (/player\.cuevana3\.eu/i.test(host)) {
+      streams = await resolveCuevanaPlayer(result, url);
+    } else if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
+      streams = await resolveDoodStream(result, url);
+    } else if (/streamtape|streamta\.pe|strtape|strcloud|stape\.fun/i.test(host)) {
+      streams = await resolveStreamtape(result, url);
+    } else if (/fastream/i.test(host)) {
+      streams = await resolveFastream(result, url);
+    } else if (/waaw|vidora/i.test(host)) {
+      streams = await resolveVidora(result, url);
+    } else if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
+      streams = await resolveStrp2p(result, url);
+    } else if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
+      streams = await resolveStreamEmbed(result, url);
+    } else if (/vimeos/i.test(host)) {
+      streams = await resolveVimeos(result, url);
+    } else if (/vidsrc|vsrc/i.test(host)) {
+      streams = await resolveVidSrc(result, url);
+    } else {
+      console.log(`[WebstreamerLatino] Unsupported host: ${result.url}`);
+      streams = [];
     }
 
-    if (/filelions|vidhide/i.test(host)) {
-      return resolveFilelions(result, url);
+    const elapsedMs = Date.now() - startedAt;
+    console.log(`[WebstreamerLatino] Resolved host ${host} in ${elapsedMs}ms with ${streams.length} streams`);
+    if (streams.length === 0) {
+      setCachedValue(hostFailureCooldowns, host, true, HOST_FAILURE_TTL_MS);
+    } else {
+      hostFailureCooldowns.delete(host);
     }
-
-    if (/emturbovid|turbovidhls|turboviplay/i.test(host)) {
-      return resolveEmturbovid(result, url);
-    }
-
-    if (/player\.cuevana3\.eu/i.test(host)) {
-      return resolveCuevanaPlayer(result, url);
-    }
-
-    if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
-      return resolveDoodStream(result, url);
-    }
-
-    if (/streamtape|streamta\.pe|strtape|strcloud|stape\.fun/i.test(host)) {
-      return resolveStreamtape(result, url);
-    }
-
-    if (/fastream/i.test(host)) {
-      return resolveFastream(result, url);
-    }
-
-    if (/waaw|vidora/i.test(host)) {
-      return resolveVidora(result, url);
-    }
-
-    if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
-      return resolveStrp2p(result, url);
-    }
-
-    if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
-      return resolveStreamEmbed(result, url);
-    }
-
-    if (/vimeos/i.test(host)) {
-      return resolveVimeos(result, url);
-    }
-
-    if (/vidsrc|vsrc/i.test(host)) {
-      return resolveVidSrc(result, url);
-    }
-
-    console.log(`[WebstreamerLatino] Unsupported host: ${result.url}`);
-    return [];
+    return streams;
   } catch (_error) {
+    try {
+      const host = new URL(result.url, result.referer || 'https://example.com').hostname;
+      setCachedValue(hostFailureCooldowns, host, true, HOST_FAILURE_TTL_MS);
+    } catch (__error) {
+      // ignore invalid URLs while recording cooldowns
+    }
     return [];
   }
 }

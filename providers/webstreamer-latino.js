@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-13T12:57:37.667Z
+ * Generated: 2026-03-14T23:27:02.880Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -92,16 +92,17 @@ var DEFAULT_HEADERS = {
 var SOURCE_BASES = {
   cuevana: "https://ww1.cuevana3.is",
   cinehdplus: "https://cinehdplus.gratis",
-  cinecalidad: "https://www.cinecalidad.am",
   homecine: "https://www3.homecine.to",
   verhdlink: "https://verhdlink.cam",
-  tioplus: "https://tioplus.app",
-  verpeliculasultra: "https://verpeliculasultra.com"
+  tioplus: "https://tioplus.app"
 };
 
 // src/webstreamer-latino/http.js
 var import_axios = __toESM(require("axios"));
 var cookieJar = /* @__PURE__ */ new Map();
+var pageCache = /* @__PURE__ */ new Map();
+var pendingPageRequests = /* @__PURE__ */ new Map();
+var PAGE_CACHE_TTL_MS = 2 * 60 * 1e3;
 function mergeHeaders(headers) {
   return __spreadValues(__spreadValues({}, DEFAULT_HEADERS), headers || {});
 }
@@ -139,6 +140,47 @@ function storeCookies(url, response) {
       Array.from(cookieMap.entries()).map(([name, value]) => `${name}=${value}`).join("; ")
     );
   }
+}
+function sortedHeaders(headers = {}) {
+  return Object.keys(headers).sort().reduce((acc, key) => {
+    acc[key] = headers[key];
+    return acc;
+  }, {});
+}
+function clonePage(page) {
+  return {
+    text: page.text,
+    url: page.url,
+    headers: __spreadValues({}, page.headers || {})
+  };
+}
+function getCachedPage(key) {
+  const entry = pageCache.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    pageCache.delete(key);
+    return null;
+  }
+  return clonePage(entry.value);
+}
+function setCachedPage(key, value) {
+  pageCache.set(key, {
+    value: clonePage(value),
+    expiresAt: Date.now() + PAGE_CACHE_TTL_MS
+  });
+}
+function createPageCacheKey(url, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  if (method !== "GET" || options.body || options._warmed) {
+    return null;
+  }
+  return JSON.stringify({
+    url,
+    method,
+    headers: sortedHeaders(options.headers || {})
+  });
 }
 function issueRequest(_0) {
   return __async(this, arguments, function* (url, options = {}) {
@@ -178,24 +220,50 @@ function warmHost(url, headers) {
 }
 function fetchPage(_0) {
   return __async(this, arguments, function* (url, options = {}) {
-    var _a, _b, _c;
-    let response = yield issueRequest(url, options);
-    if (response.status === 403 && !options._warmed) {
-      yield warmHost(url, options.headers);
-      response = yield issueRequest(url, __spreadProps(__spreadValues({}, options), { _warmed: true }));
+    const cacheKey = createPageCacheKey(url, options);
+    if (cacheKey) {
+      const cached = getCachedPage(cacheKey);
+      if (cached) {
+        return cached;
+      }
+      const pending = pendingPageRequests.get(cacheKey);
+      if (pending) {
+        return clonePage(yield pending);
+      }
     }
-    if (response.status < 200 || response.status >= 300) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
+    const request = (() => __async(this, null, function* () {
+      var _a, _b, _c;
+      let response = yield issueRequest(url, options);
+      if (response.status === 403 && !options._warmed) {
+        yield warmHost(url, options.headers);
+        response = yield issueRequest(url, __spreadProps(__spreadValues({}, options), { _warmed: true }));
+      }
+      if (response.status < 200 || response.status >= 300) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText} for ${url}`);
+      }
+      const headers = {};
+      for (const [key, value] of Object.entries(response.headers || {})) {
+        headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+      }
+      const page = {
+        text: typeof response.data === "string" ? response.data : String(response.data || ""),
+        url: ((_b = (_a = response.request) == null ? void 0 : _a.res) == null ? void 0 : _b.responseUrl) || ((_c = response.config) == null ? void 0 : _c.url) || url,
+        headers
+      };
+      if (cacheKey) {
+        setCachedPage(cacheKey, page);
+      }
+      return page;
+    }))();
+    if (!cacheKey) {
+      return request;
     }
-    const headers = {};
-    for (const [key, value] of Object.entries(response.headers || {})) {
-      headers[key.toLowerCase()] = Array.isArray(value) ? value.join(", ") : String(value);
+    pendingPageRequests.set(cacheKey, request);
+    try {
+      return clonePage(yield request);
+    } finally {
+      pendingPageRequests.delete(cacheKey);
     }
-    return {
-      text: typeof response.data === "string" ? response.data : String(response.data || ""),
-      url: ((_b = (_a = response.request) == null ? void 0 : _a.res) == null ? void 0 : _b.responseUrl) || ((_c = response.config) == null ? void 0 : _c.url) || url,
-      headers
-    };
   });
 }
 function fetchText(_0) {
@@ -333,6 +401,38 @@ function guessHeightFromPlaylist(_0) {
 }
 
 // src/webstreamer-latino/sources.js
+var SOURCE_RESULTS_TTL_MS = 2 * 60 * 1e3;
+var sourceResultsCache = /* @__PURE__ */ new Map();
+var pendingSourceRequests = /* @__PURE__ */ new Map();
+var prewarmCache = /* @__PURE__ */ new Map();
+function getCachedValue(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+function setCachedValue(cache, key, value, ttlMs) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs
+  });
+}
+function sourceCacheKey(tmdb, season, episode) {
+  return JSON.stringify({
+    tmdbId: tmdb.tmdbId,
+    mediaType: tmdb.mediaType,
+    season: season || null,
+    episode: episode || null,
+    title: tmdb.title,
+    originalTitle: tmdb.originalTitle,
+    year: tmdb.year
+  });
+}
 function languageMeta(kind) {
   return kind === "mx" ? { language: "Latino", contentLanguage: "es-mx" } : { language: "Castellano", contentLanguage: "es-es" };
 }
@@ -344,40 +444,68 @@ function buildTitle(tmdb, season, episode) {
 }
 function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   return __async(this, null, function* () {
-    yield Promise.allSettled([
-      prewarmSource(SOURCE_BASES.cuevana),
-      prewarmSource(SOURCE_BASES.cinecalidad),
-      prewarmSource(SOURCE_BASES.verhdlink),
-      prewarmSource(SOURCE_BASES.tioplus),
-      prewarmSource(SOURCE_BASES.verpeliculasultra)
-    ]);
-    const tasks = [
-      searchCuevana(tmdb, season, episode),
-      searchCineHdPlus(tmdb, mediaType, season, episode),
-      searchCineCalidad(tmdb, mediaType, season, episode),
-      searchHomeCine(tmdb, season, episode),
-      searchVerHdLink(tmdb, mediaType),
-      searchTioPlus(tmdb, mediaType, season, episode),
-      searchVerPeliculasUltra(tmdb, mediaType)
-    ];
-    const settled = yield Promise.allSettled(tasks);
-    return settled.flatMap((result) => {
-      if (result.status === "fulfilled") {
-        return result.value;
-      }
-      console.error("[WebstreamerLatino] Source error:", result.reason ? result.reason.message : result.reason);
-      return [];
-    });
+    const cacheKey = sourceCacheKey(tmdb, season, episode);
+    const cached = getCachedValue(sourceResultsCache, cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const pending = pendingSourceRequests.get(cacheKey);
+    if (pending) {
+      return pending;
+    }
+    const request = (() => __async(this, null, function* () {
+      yield Promise.allSettled([
+        prewarmSource(SOURCE_BASES.cuevana),
+        prewarmSource(SOURCE_BASES.cinecalidad),
+        prewarmSource(SOURCE_BASES.verhdlink),
+        prewarmSource(SOURCE_BASES.tioplus),
+        prewarmSource(SOURCE_BASES.verpeliculasultra)
+      ]);
+      const tasks = [
+        searchCuevana(tmdb, season, episode),
+        searchCineHdPlus(tmdb, mediaType, season, episode),
+        searchCineCalidad(tmdb, mediaType, season, episode),
+        searchHomeCine(tmdb, season, episode),
+        searchVerHdLink(tmdb, mediaType),
+        searchTioPlus(tmdb, mediaType, season, episode),
+        searchVerPeliculasUltra(tmdb, mediaType)
+      ];
+      const settled = yield Promise.allSettled(tasks);
+      const merged = settled.flatMap((result) => {
+        if (result.status === "fulfilled") {
+          return result.value;
+        }
+        console.error("[WebstreamerLatino] Source error:", result.reason ? result.reason.message : result.reason);
+        return [];
+      });
+      const uniqueResults = uniqueBy(
+        merged,
+        (item) => `${item.url}|${item.referer || ""}|${JSON.stringify(item.headers || {})}`
+      );
+      setCachedValue(sourceResultsCache, cacheKey, uniqueResults, SOURCE_RESULTS_TTL_MS);
+      return uniqueResults;
+    }))();
+    pendingSourceRequests.set(cacheKey, request);
+    try {
+      return yield request;
+    } finally {
+      pendingSourceRequests.delete(cacheKey);
+    }
   });
 }
 function prewarmSource(baseUrl) {
   return __async(this, null, function* () {
+    const cached = getCachedValue(prewarmCache, baseUrl);
+    if (cached) {
+      return cached;
+    }
     yield fetchPage(baseUrl, {
       headers: {
         Referer: baseUrl,
         Origin: new URL(baseUrl).origin
       }
     }).catch(() => null);
+    setCachedValue(prewarmCache, baseUrl, true, SOURCE_RESULTS_TTL_MS);
   });
 }
 function searchCuevana(tmdb, season, episode) {
@@ -1112,6 +1240,61 @@ function resolveTioPlusPlayer(result) {
 var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-native"));
 var import_crypto_js = __toESM(require("crypto-js"));
 var SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === "production";
+var RESOLVER_CONCURRENCY = 4;
+var RESOLVER_CACHE_TTL_MS = 3 * 60 * 1e3;
+var HOST_FAILURE_TTL_MS = 90 * 1e3;
+var resolverCache = /* @__PURE__ */ new Map();
+var pendingResolverRequests = /* @__PURE__ */ new Map();
+var hostFailureCooldowns = /* @__PURE__ */ new Map();
+function getCachedValue2(cache, key) {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+function setCachedValue2(cache, key, value, ttlMs) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs
+  });
+}
+function resultCacheKey(result) {
+  return JSON.stringify({
+    url: result.url,
+    referer: result.referer || "",
+    headers: result.headers || {},
+    source: result.source || "",
+    title: result.title || ""
+  });
+}
+function cloneStreams(streams) {
+  return streams.map((stream) => __spreadProps(__spreadValues({}, stream), {
+    headers: __spreadValues({}, stream.headers || {})
+  }));
+}
+function mapWithConcurrency(items, limit, mapper) {
+  return __async(this, null, function* () {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    function worker() {
+      return __async(this, null, function* () {
+        while (nextIndex < items.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          results[index] = yield mapper(items[index], index);
+        }
+      });
+    }
+    const workerCount = Math.min(limit, items.length);
+    yield Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return results;
+  });
+}
 function absoluteUrl(rawUrl, origin) {
   return new URL(rawUrl.replace(/^\/\//, "https://"), origin).href;
 }
@@ -1133,11 +1316,24 @@ function buildStream(result, extracted) {
 }
 function resolveLatinoStreams(results) {
   return __async(this, null, function* () {
-    results.forEach((result) => {
+    const uniqueResults = uniqueBy(
+      results,
+      (result) => `${result.url}|${result.referer || ""}|${JSON.stringify(result.headers || {})}`
+    );
+    uniqueResults.forEach((result) => {
       const player = inferPlayerFromUrl(result.url);
       console.log(`[WebstreamerLatino] Candidate: ${result.source} -> ${result.url} -> ${player || "unknown"}`);
     });
-    const settled = yield Promise.allSettled(results.map((result) => resolveOne(result)));
+    if (uniqueResults.length !== results.length) {
+      console.log(`[WebstreamerLatino] Deduped candidates: ${results.length} -> ${uniqueResults.length}`);
+    }
+    const settled = yield mapWithConcurrency(uniqueResults, RESOLVER_CONCURRENCY, (result) => __async(this, null, function* () {
+      try {
+        return { status: "fulfilled", value: yield resolveOne(result) };
+      } catch (_error) {
+        return { status: "rejected", value: [] };
+      }
+    }));
     const streams = settled.flatMap((item) => {
       if (item.status === "fulfilled") {
         return item.value;
@@ -1163,59 +1359,90 @@ function resolveLatinoStreams(results) {
 }
 function resolveOne(result) {
   return __async(this, null, function* () {
+    const cacheKey = resultCacheKey(result);
+    const cached = getCachedValue2(resolverCache, cacheKey);
+    if (cached) {
+      return cloneStreams(cached);
+    }
+    const pending = pendingResolverRequests.get(cacheKey);
+    if (pending) {
+      return cloneStreams(yield pending);
+    }
+    const request = resolveOneUncached(result);
+    pendingResolverRequests.set(cacheKey, request);
+    try {
+      const resolved = yield request;
+      if (resolved.length > 0) {
+        setCachedValue2(resolverCache, cacheKey, resolved, RESOLVER_CACHE_TTL_MS);
+      }
+      return cloneStreams(resolved);
+    } finally {
+      pendingResolverRequests.delete(cacheKey);
+    }
+  });
+}
+function resolveOneUncached(result) {
+  return __async(this, null, function* () {
     try {
       const url = new URL(result.url, result.referer || "https://example.com");
       const host = url.hostname;
+      const blockedUntil = getCachedValue2(hostFailureCooldowns, host);
+      if (blockedUntil) {
+        console.log(`[WebstreamerLatino] Host cooldown active: ${host}`);
+        return [];
+      }
+      const startedAt = Date.now();
+      let streams = [];
       if (/\.(m3u8|mp4)(\?|$)/i.test(url.href)) {
-        return [buildStream(result, { url: url.href, player: inferPlayerFromUrl(url.href) })];
-      }
-      if (/supervideo/i.test(host)) {
+        streams = [buildStream(result, { url: url.href, player: inferPlayerFromUrl(url.href) })];
+      } else if (/supervideo/i.test(host)) {
         console.log(`[WebstreamerLatino] SuperVideo skipped: ${result.url}`);
-        return [];
-      }
-      if (/dropload|dr0pstream/i.test(host)) {
-        return resolveDropload(result, url);
-      }
-      if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
+        streams = [];
+      } else if (/dropload|dr0pstream/i.test(host)) {
+        streams = yield resolveDropload(result, url);
+      } else if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
         console.log(`[WebstreamerLatino] Mixdrop skipped: ${result.url}`);
-        return [];
+        streams = [];
+      } else if (/filelions|vidhide/i.test(host)) {
+        streams = yield resolveFilelions(result, url);
+      } else if (/emturbovid|turbovidhls|turboviplay/i.test(host)) {
+        streams = yield resolveEmturbovid(result, url);
+      } else if (/player\.cuevana3\.eu/i.test(host)) {
+        streams = yield resolveCuevanaPlayer(result, url);
+      } else if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
+        streams = yield resolveDoodStream(result, url);
+      } else if (/streamtape|streamta\.pe|strtape|strcloud|stape\.fun/i.test(host)) {
+        streams = yield resolveStreamtape(result, url);
+      } else if (/fastream/i.test(host)) {
+        streams = yield resolveFastream(result, url);
+      } else if (/waaw|vidora/i.test(host)) {
+        streams = yield resolveVidora(result, url);
+      } else if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
+        streams = yield resolveStrp2p(result, url);
+      } else if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
+        streams = yield resolveStreamEmbed(result, url);
+      } else if (/vimeos/i.test(host)) {
+        streams = yield resolveVimeos(result, url);
+      } else if (/vidsrc|vsrc/i.test(host)) {
+        streams = yield resolveVidSrc(result, url);
+      } else {
+        console.log(`[WebstreamerLatino] Unsupported host: ${result.url}`);
+        streams = [];
       }
-      if (/filelions|vidhide/i.test(host)) {
-        return resolveFilelions(result, url);
+      const elapsedMs = Date.now() - startedAt;
+      console.log(`[WebstreamerLatino] Resolved host ${host} in ${elapsedMs}ms with ${streams.length} streams`);
+      if (streams.length === 0) {
+        setCachedValue2(hostFailureCooldowns, host, true, HOST_FAILURE_TTL_MS);
+      } else {
+        hostFailureCooldowns.delete(host);
       }
-      if (/emturbovid|turbovidhls|turboviplay/i.test(host)) {
-        return resolveEmturbovid(result, url);
-      }
-      if (/player\.cuevana3\.eu/i.test(host)) {
-        return resolveCuevanaPlayer(result, url);
-      }
-      if (/dood|do[0-9]go|doood|dooood|ds2play|ds2video|dsvplay|d0o0d|do0od|d0000d|d000d|myvidplay|vidply|all3do|doply|vide0|vvide0|d-s/i.test(host)) {
-        return resolveDoodStream(result, url);
-      }
-      if (/streamtape|streamta\.pe|strtape|strcloud|stape\.fun/i.test(host)) {
-        return resolveStreamtape(result, url);
-      }
-      if (/fastream/i.test(host)) {
-        return resolveFastream(result, url);
-      }
-      if (/waaw|vidora/i.test(host)) {
-        return resolveVidora(result, url);
-      }
-      if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
-        return resolveStrp2p(result, url);
-      }
-      if (/bullstream|mp4player|watch\.gxplayer/i.test(host)) {
-        return resolveStreamEmbed(result, url);
-      }
-      if (/vimeos/i.test(host)) {
-        return resolveVimeos(result, url);
-      }
-      if (/vidsrc|vsrc/i.test(host)) {
-        return resolveVidSrc(result, url);
-      }
-      console.log(`[WebstreamerLatino] Unsupported host: ${result.url}`);
-      return [];
+      return streams;
     } catch (_error) {
+      try {
+        const host = new URL(result.url, result.referer || "https://example.com").hostname;
+        setCachedValue2(hostFailureCooldowns, host, true, HOST_FAILURE_TTL_MS);
+      } catch (__error) {
+      }
       return [];
     }
   });

@@ -25,8 +25,9 @@ const pDir = path.join(__dirname, 'providers');
 const activeProviders = new Set(addonConfig.activeProviders || []);
 const cinemetaCache = new Map();
 const streamCache = new Map();
+const pendingStreamRequests = new Map();
 const CINEMETA_TTL_MS = 30 * 60 * 1000;
-const STREAM_CACHE_TTL_MS = 60 * 1000;
+const STREAM_CACHE_TTL_MS = 3 * 60 * 1000;
 
 function withTimeout(promise, ms, fallback) {
     return Promise.race([
@@ -59,6 +60,23 @@ function setCacheEntry(cache, key, value, ttlMs) {
         value,
         expiresAt: Date.now() + ttlMs
     });
+}
+
+async function runProvider(provider, tmdbId, mediaType, season, episode) {
+    const timeoutMs = PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS;
+    const startedAt = Date.now();
+    const result = await withTimeout(
+        Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode)).catch((error) => {
+            console.error(`[stream handler] provider ${provider.name} failed: ${error && error.message ? error.message : error}`);
+            return [];
+        }),
+        timeoutMs,
+        () => timeoutFallback(provider.name, timeoutMs)
+    );
+    const elapsedMs = Date.now() - startedAt;
+    const count = Array.isArray(result) ? result.length : 0;
+    console.log(`[stream handler] provider ${provider.name} completed in ${elapsedMs}ms with ${count} streams`);
+    return Array.isArray(result) ? result : [];
 }
 
 if (fs.existsSync(pDir)) {
@@ -295,75 +313,87 @@ builder.defineStreamHandler(async ({ type, id }) => {
         return { streams: cachedStreams };
     }
 
-    const [imdbId, season, episode] = id.split(":");
-    const cinemetaKey = `${type}:${imdbId}`;
-    let tmdbId = getCacheEntry(cinemetaCache, cinemetaKey);
-    if (!tmdbId) {
-        try {
-            const { data } = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`, {
-                timeout: 5000
-            });
-            tmdbId = data.meta.moviedb_id;
-            if (tmdbId) {
-                setCacheEntry(cinemetaCache, cinemetaKey, tmdbId, CINEMETA_TTL_MS);
-            }
-        } catch (_e) {}
+    const pendingRequest = pendingStreamRequests.get(cacheKey);
+    if (pendingRequest) {
+        console.log(`[stream handler] joining in-flight request for ${cacheKey}`);
+        return pendingRequest;
     }
 
-    if (!tmdbId) return { streams: [] };
-
-    // Convert series to tv
-    const mediaType = type === "series" ? "tv" : "movie";
-    const results = await Promise.all(
-        providers.map((provider) => withTimeout(
-            Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode)).catch(() => []),
-            PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS,
-            () => timeoutFallback(provider.name, PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS)
-        ))
-    ).catch(() => []);
-
-    const streams = (Array.isArray(results) ? results.flat() : [])
-        .filter(s => s && s.url)
-        .sort((a, b) => {
-            const priorityDiff = streamPriority(b) - streamPriority(a);
-            if (priorityDiff !== 0) {
-                return priorityDiff;
-            }
-            return (a.name || '').localeCompare(b.name || '');
-        })
-        .map(s => {
-            const providerHeaders = s.headers || {};
-            
-            // Merge provider headers directly (keeps the correct Referer and Cookie from Netmirror)
-            const finalHeaders = {
-                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-                ...providerHeaders
-            };
-
-            // route the stream through our local proxy so that headers/cookies are
-            // consistently applied even for playlist/segment requests
-            const proxiedUrl = s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
-                ? ensureAddonAbsolute(s.url)
-                : proxyWrap(s.url, finalHeaders);
-
-            return {
-                name: s.name || "Source",
-                title: s.title || "Stream",
-                url: proxiedUrl,
-                subtitles: s.subtitles || [],
-                behaviorHints: {
-                    notWebReady: true
+    const pendingWork = (async () => {
+        const [imdbId, season, episode] = id.split(":");
+        const cinemetaKey = `${type}:${imdbId}`;
+        let tmdbId = getCacheEntry(cinemetaCache, cinemetaKey);
+        if (!tmdbId) {
+            try {
+                const { data } = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`, {
+                    timeout: 5000
+                });
+                tmdbId = data.meta.moviedb_id;
+                if (tmdbId) {
+                    setCacheEntry(cinemetaCache, cinemetaKey, tmdbId, CINEMETA_TTL_MS);
                 }
-            };
-        });
+            } catch (_e) {}
+        }
 
-    console.log(`Sending ${streams.length} streams`);
-    if (streams.length > 0) {
-        setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
-    } else {
-        console.log(`[stream handler] skipping empty cache write for ${cacheKey}`);
+        if (!tmdbId) return { streams: [] };
+
+        // Convert series to tv
+        const mediaType = type === "series" ? "tv" : "movie";
+        const results = await Promise.all(
+            providers.map((provider) => runProvider(provider, tmdbId, mediaType, season, episode))
+        ).catch(() => []);
+
+        const streams = (Array.isArray(results) ? results.flat() : [])
+            .filter(s => s && s.url)
+            .sort((a, b) => {
+                const priorityDiff = streamPriority(b) - streamPriority(a);
+                if (priorityDiff !== 0) {
+                    return priorityDiff;
+                }
+                return (a.name || '').localeCompare(b.name || '');
+            })
+            .map(s => {
+                const providerHeaders = s.headers || {};
+                
+                // Merge provider headers directly (keeps the correct Referer and Cookie from Netmirror)
+                const finalHeaders = {
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                    ...providerHeaders
+                };
+
+                // route the stream through our local proxy so that headers/cookies are
+                // consistently applied even for playlist/segment requests
+                const proxiedUrl = s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
+                    ? ensureAddonAbsolute(s.url)
+                    : proxyWrap(s.url, finalHeaders);
+
+                return {
+                    name: s.name || "Source",
+                    title: s.title || "Stream",
+                    url: proxiedUrl,
+                    subtitles: s.subtitles || [],
+                    behaviorHints: {
+                        notWebReady: true
+                    }
+                };
+            });
+
+        console.log(`Sending ${streams.length} streams`);
+        if (streams.length > 0) {
+            setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
+        } else {
+            console.log(`[stream handler] skipping empty cache write for ${cacheKey}`);
+        }
+        return { streams };
+    })();
+
+    pendingStreamRequests.set(cacheKey, pendingWork);
+
+    try {
+        return await pendingWork;
+    } finally {
+        pendingStreamRequests.delete(cacheKey);
     }
-    return { streams };
 });
 
 // we build our own express server instead of using serveHTTP so we can
