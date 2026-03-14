@@ -9,7 +9,7 @@ const express = require('express'); // used later when attaching proxy route
 const DEFAULT_TIMEOUT_MS = 7000;
 const PROVIDER_TIMEOUT_MS = {
     netmirror: 9000,
-    'webstreamer-latino': 8000,
+    'webstreamer-latino': 15000,
     vidlink: 5000,
     vixsrc: 5000,
     yflix: 5000,
@@ -31,8 +31,13 @@ const STREAM_CACHE_TTL_MS = 60 * 1000;
 function withTimeout(promise, ms, fallback) {
     return Promise.race([
         promise,
-        new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+        new Promise((resolve) => setTimeout(() => resolve(typeof fallback === 'function' ? fallback() : fallback), ms)),
     ]);
+}
+
+function timeoutFallback(providerName, ms) {
+    console.warn(`[stream handler] provider ${providerName} timed out after ${ms}ms`);
+    return [];
 }
 
 function getCacheEntry(cache, key) {
@@ -313,7 +318,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
         providers.map((provider) => withTimeout(
             Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode)).catch(() => []),
             PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS,
-            []
+            () => timeoutFallback(provider.name, PROVIDER_TIMEOUT_MS[provider.name] || DEFAULT_TIMEOUT_MS)
         ))
     ).catch(() => []);
 
@@ -353,7 +358,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
         });
 
     console.log(`Sending ${streams.length} streams`);
-    setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
+    if (streams.length > 0) {
+        setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
+    } else {
+        console.log(`[stream handler] skipping empty cache write for ${cacheKey}`);
+    }
     return { streams };
 });
 
