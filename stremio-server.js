@@ -361,20 +361,32 @@ builder.defineStreamHandler(async ({ type, id }) => {
                     ...providerHeaders
                 };
 
-                // route the stream through our local proxy so that headers/cookies are
-                // consistently applied even for playlist/segment requests
-                const proxiedUrl = s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
-                    ? ensureAddonAbsolute(s.url)
-                    : proxyWrap(s.url, finalHeaders);
+                const isNetmirrorStream = s.provider === 'netmirror';
+                // Netmirror HLS works upstream with direct URLs plus request headers.
+                // Avoid our nested proxy rewriting for this provider because it can
+                // interfere with some Stremio clients during playlist playback.
+                const streamUrl = isNetmirrorStream
+                    ? s.url
+                    : (s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
+                        ? ensureAddonAbsolute(s.url)
+                        : proxyWrap(s.url, finalHeaders));
+
+                const behaviorHints = {
+                    notWebReady: true
+                };
+
+                if (isNetmirrorStream) {
+                    behaviorHints.proxyHeaders = {
+                        request: finalHeaders
+                    };
+                }
 
                 return {
                     name: s.name || "Source",
                     title: s.title || "Stream",
-                    url: proxiedUrl,
+                    url: streamUrl,
                     subtitles: s.subtitles || [],
-                    behaviorHints: {
-                        notWebReady: true
-                    }
+                    behaviorHints
                 };
             });
 

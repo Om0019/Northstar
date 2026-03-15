@@ -530,6 +530,7 @@ function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = 
                   "Referer": `${NETMIRROR_PLAY}/`
                 };
                 return {
+                  provider: "netmirror",
                   name: `${platform.charAt(0).toUpperCase() + platform.slice(1)}`,
                   title: streamTitle,
                   url: source.url,
