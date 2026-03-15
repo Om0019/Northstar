@@ -27,7 +27,7 @@ const cinemetaCache = new Map();
 const streamCache = new Map();
 const pendingStreamRequests = new Map();
 const CINEMETA_TTL_MS = 30 * 60 * 1000;
-const STREAM_CACHE_TTL_MS = 3 * 60 * 1000;
+const STREAM_CACHE_TTL_MS = 60 * 1000;
 
 function withTimeout(promise, ms, fallback) {
     return Promise.race([
@@ -343,8 +343,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
             providers.map((provider) => runProvider(provider, tmdbId, mediaType, season, episode))
         ).catch(() => []);
 
-        const streams = (Array.isArray(results) ? results.flat() : [])
-            .filter(s => s && s.url)
+        const flatStreams = (Array.isArray(results) ? results.flat() : [])
+            .filter(s => s && s.url);
+        const hasNetmirrorStream = flatStreams.some((stream) => stream.provider === 'netmirror');
+        const streams = flatStreams
             .sort((a, b) => {
                 const priorityDiff = streamPriority(b) - streamPriority(a);
                 if (priorityDiff !== 0) {
@@ -361,38 +363,28 @@ builder.defineStreamHandler(async ({ type, id }) => {
                     ...providerHeaders
                 };
 
-                const isNetmirrorStream = s.provider === 'netmirror';
-                // Netmirror HLS works upstream with direct URLs plus request headers.
-                // Avoid our nested proxy rewriting for this provider because it can
-                // interfere with some Stremio clients during playlist playback.
-                const streamUrl = isNetmirrorStream
-                    ? s.url
-                    : (s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
-                        ? ensureAddonAbsolute(s.url)
-                        : proxyWrap(s.url, finalHeaders));
-
-                const behaviorHints = {
-                    notWebReady: true
-                };
-
-                if (isNetmirrorStream) {
-                    behaviorHints.proxyHeaders = {
-                        request: finalHeaders
-                    };
-                }
+                // route the stream through our local proxy so that headers/cookies are
+                // consistently applied even for playlist/segment requests
+                const proxiedUrl = s.url.startsWith('/extractor/video?') || s.url.includes('/extractor/video?')
+                    ? ensureAddonAbsolute(s.url)
+                    : proxyWrap(s.url, finalHeaders);
 
                 return {
                     name: s.name || "Source",
                     title: s.title || "Stream",
-                    url: streamUrl,
+                    url: proxiedUrl,
                     subtitles: s.subtitles || [],
-                    behaviorHints
+                    behaviorHints: {
+                        notWebReady: true
+                    }
                 };
             });
 
         console.log(`Sending ${streams.length} streams`);
-        if (streams.length > 0) {
+        if (streams.length > 0 && !hasNetmirrorStream) {
             setCacheEntry(streamCache, cacheKey, streams, STREAM_CACHE_TTL_MS);
+        } else if (hasNetmirrorStream) {
+            console.log(`[stream handler] skipping cache for ${cacheKey} because Netmirror stream URLs are short-lived`);
         } else {
             console.log(`[stream handler] skipping empty cache write for ${cacheKey}`);
         }
