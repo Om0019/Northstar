@@ -19,7 +19,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 console.log("[NetMirror] Initializing NetMirror provider");
 const TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
-const NETMIRROR_BASE = "https://net22.cc";
+const NETMIRROR_BASE = "https://net52.cc";
 const NETMIRROR_PLAY = "https://net52.cc";
 const BASE_HEADERS = {
   "X-Requested-With": "XMLHttpRequest",
@@ -85,51 +85,6 @@ function bypass() {
     });
   }
   return attemptBypass(0);
-}
-function getVideoToken(id, cookie, ott) {
-  const cookies = {
-    "t_hash_t": cookie,
-    "ott": ott || "nf",
-    "hd": "on"
-  };
-  const cookieString = Object.entries(cookies).map(([key, value]) => `${key}=${value}`).join("; ");
-  return makeRequest(`${NETMIRROR_BASE}/play.php`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "X-Requested-With": "XMLHttpRequest",
-      "Referer": `${NETMIRROR_BASE}/`,
-      "Cookie": cookieString
-    },
-    body: `id=${id}`
-  }).then((response) => response.json()).then((playData) => {
-    const h = playData.h;
-    const headers2 = {
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "en-GB,en;q=0.9",
-      "Connection": "keep-alive",
-      "Host": "net52.cc",
-      "Referer": `${NETMIRROR_BASE}/`,
-      "sec-ch-ua": "\"Chromium\";v=\"142\", \"Brave\";v=\"142\", \"Not_A Brand\";v=\"99\"",
-      "sec-ch-ua-mobile": "?0",
-      "sec-ch-ua-platform": "\"Linux\"",
-      "Sec-Fetch-Dest": "iframe",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "cross-site",
-      "Sec-Fetch-Storage-Access": "none",
-      "Sec-Fetch-User": "?1",
-      "Sec-GPC": "1",
-      "Upgrade-Insecure-Requests": "1",
-      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-      "Cookie": cookieString
-    };
-    return makeRequest(`${NETMIRROR_PLAY}/play.php?id=${id}&${h}`, {
-      headers: headers2
-    });
-  }).then((response) => response.text()).then((play2Text) => {
-    const tokenMatch = play2Text.match(/data-h="([^"]+)"/);
-    return tokenMatch ? tokenMatch[1] : null;
-  });
 }
 function searchContent(query, platform) {
   console.log(`[NetMirror] Searching for "${query}" on ${platform}...`);
@@ -317,13 +272,9 @@ function getStreamingLinks(contentId, title, platform) {
     "disney": "hs"
   };
   const ott = ottMap[platform.toLowerCase()] || "nf";
-  let globalCookieValue = "";
   return bypass().then(function(cookie) {
-    globalCookieValue = cookie;
-    return getVideoToken(contentId, cookie, ott);
-  }).then(function(token) {
     const cookies = {
-      "t_hash_t": globalCookieValue,
+      "t_hash_t": cookie,
       "ott": ott,
       "hd": "on"
     };
@@ -335,7 +286,7 @@ function getStreamingLinks(contentId, title, platform) {
     };
     const playlistUrl = playlistEndpoints[platform.toLowerCase()] || playlistEndpoints["netflix"];
     return makeRequest(
-      `${playlistUrl}?id=${contentId}&t=${encodeURIComponent(title)}&tm=${getUnixTime()}&h=${token}`,
+      `${playlistUrl}?id=${contentId}&t=${encodeURIComponent(title)}&tm=${getUnixTime()}`,
       {
         headers: __spreadProps(__spreadValues({}, BASE_HEADERS), {
           "Cookie": cookieString,
@@ -358,7 +309,7 @@ function getStreamingLinks(contentId, title, platform) {
           let fullUrl = source.file.replace("/tv/", "/");
           if (!fullUrl.startsWith("/"))
             fullUrl = "/" + fullUrl;
-          fullUrl = NETMIRROR_PLAY + "/" + fullUrl;
+          fullUrl = NETMIRROR_PLAY + fullUrl;
           sources.push({
             url: fullUrl,
             quality: source.label,
