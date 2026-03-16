@@ -1,0 +1,6 @@
+.DS_Store
+node_modules/
+NorthstarMonitorIOS/DerivedData/
+NorthstarMonitorIOS/.DS_Store
+NorthstarMonitorIOS/**/*.xcuserstate
+NorthstarMonitorIOS/**/*.xcuserdata/

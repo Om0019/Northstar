@@ -17,6 +17,7 @@ Default local URLs:
 ```text
 http://127.0.0.1:7010/manifest.json
 http://127.0.0.1:7010/health
+http://127.0.0.1:7010/monitor/summary
 ```
 
 ### Render
@@ -26,7 +27,36 @@ The repo includes [`render.yaml`](./render.yaml). Set:
 ```text
 NODE_ENV=production
 ADDON_PUBLIC_URL=https://your-service.onrender.com
+MONITOR_TOKEN=choose-a-long-random-token
 ```
+
+## Monitoring API
+
+The addon server now exposes a lightweight monitoring API intended for a simple dashboard app, including iOS clients.
+
+Auth:
+
+- If `MONITOR_TOKEN` is set, send either `Authorization: Bearer <token>` or `x-monitor-token: <token>`.
+- If `MONITOR_TOKEN` is not set, monitoring endpoints are public. Do not leave it unset on Northflank.
+
+Endpoints:
+
+```text
+GET /monitor/summary
+GET /monitor/devices?limit=100
+GET /monitor/activity?limit=100
+GET /monitor/logs?limit=100
+GET /monitor/errors?limit=100
+```
+
+What they return:
+
+- `devices`: recent clients inferred from request headers and IP, including app/platform, last seen time, and request count.
+- `activity`: recent stream lookups, including title, IMDb/TMDB IDs, season/episode, and how many streams were returned.
+- `logs`: buffered runtime logs from the addon server.
+- `errors`: buffered `console.error`, unhandled promise rejections, and uncaught exceptions.
+
+See [`IOS_MONITOR_APP.md`](./IOS_MONITOR_APP.md) for a minimal SwiftUI client structure.
 
 ---
 

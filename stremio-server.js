@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const dns = require('dns').promises;
+const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 const { pathToFileURL } = require('url');
 const { addonBuilder } = require("stremio-addon-sdk");
 const axios = require("axios");
@@ -9,12 +11,495 @@ const express = require('express'); // used later when attaching proxy route
 const TIMEOUT_MS = 15000;
 const IS_PROD = process.env.NODE_ENV === 'production';
 const PUBLIC_ADDON_BASE = (process.env.ADDON_PUBLIC_URL || '').replace(/\/$/, '');
+const MONITOR_TOKEN = process.env.MONITOR_TOKEN || '';
 const DEFAULT_LOGO_URL = 'https://raw.githubusercontent.com/Om0019/Northstar/refs/heads/main/Assets/image.png';
 const ADDON_LOGO_URL = PUBLIC_ADDON_BASE ? `${PUBLIC_ADDON_BASE}/Assets/image.png` : DEFAULT_LOGO_URL;
+const requestContextStore = new AsyncLocalStorage();
+const LOG_LIMIT = 250;
+const DEVICE_LIMIT = 200;
+const ACTIVITY_LIMIT = 250;
+const ERROR_LIMIT = 250;
+const PLAYBACK_SESSION_LIMIT = 250;
+const PLAYBACK_ACTIVE_WINDOW_MS = 10 * 60 * 1000;
+const PLAYBACK_RECENT_WINDOW_MS = 60 * 60 * 1000;
 const addonConfig = require('./addon.config.json');
 const providers = [];
 const pDir = path.join(__dirname, 'providers');
 const activeProviders = new Set(addonConfig.activeProviders || []);
+const KNOWN_PLAYERS = [
+    'DoodStream',
+    'FileLions',
+    'Mixdrop',
+    'Streamtape',
+    'StrP2P',
+    'StreamEmbed',
+    'Dropload',
+    'Emturbovid',
+    'Vidora',
+    'Vimeos',
+    'VidSrc',
+    'Fastream',
+    'Unknown',
+];
+const monitorState = {
+    startedAt: new Date().toISOString(),
+    lastUpdatedAt: new Date().toISOString(),
+    devices: new Map(),
+    activity: [],
+    logs: [],
+    errors: [],
+    playbackSessions: new Map(),
+};
+const controlState = {
+    paused: false,
+    stopped: false,
+    providers: new Map(),
+    players: new Map(KNOWN_PLAYERS.map((player) => [player, { enabled: true, lastSeenAt: null, seenCount: 0 }])),
+};
+
+function trimArray(array, limit) {
+    while (array.length > limit) {
+        array.shift();
+    }
+}
+
+function maskToken(token) {
+    if (!token) {
+        return 'disabled';
+    }
+
+    if (token.length <= 6) {
+        return `${token[0] || ''}***`;
+    }
+
+    return `${token.slice(0, 3)}***${token.slice(-3)}`;
+}
+
+function nowIso() {
+    return new Date().toISOString();
+}
+
+function touchMonitorState() {
+    monitorState.lastUpdatedAt = nowIso();
+}
+
+function formatConsoleArgs(args) {
+    return args.map((value) => {
+        if (typeof value === 'string') {
+            return value;
+        }
+
+        if (value instanceof Error) {
+            return value.stack || value.message;
+        }
+
+        try {
+            return JSON.stringify(value);
+        } catch (_error) {
+            return String(value);
+        }
+    }).join(' ');
+}
+
+function getRequestIp(req) {
+    if (!req) {
+        return 'unknown';
+    }
+
+    const forwardedFor = req.headers['x-forwarded-for'];
+    if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+        return forwardedFor.split(',')[0].trim();
+    }
+
+    return req.headers['cf-connecting-ip']
+        || req.headers['x-real-ip']
+        || req.socket?.remoteAddress
+        || 'unknown';
+}
+
+function inferDevice(userAgent) {
+    const ua = String(userAgent || '');
+    const lowered = ua.toLowerCase();
+    const deviceType = lowered.includes('ipad') ? 'tablet'
+        : lowered.includes('iphone') ? 'phone'
+            : lowered.includes('android') && lowered.includes('mobile') ? 'phone'
+                : lowered.includes('android') ? 'tablet'
+                    : lowered.includes('tv') || lowered.includes('appletv') ? 'tv'
+                        : lowered.includes('windows') || lowered.includes('macintosh') || lowered.includes('linux') ? 'desktop'
+                            : 'unknown';
+    const platform = lowered.includes('iphone') || lowered.includes('ipad') || lowered.includes('ios') ? 'iOS'
+        : lowered.includes('android') ? 'Android'
+            : lowered.includes('macintosh') || lowered.includes('mac os') ? 'macOS'
+                : lowered.includes('windows') ? 'Windows'
+                    : lowered.includes('linux') ? 'Linux'
+                        : lowered.includes('appletv') ? 'tvOS'
+                            : 'Unknown';
+    const app = lowered.includes('stremio') ? 'Stremio'
+        : lowered.includes('curl') ? 'curl'
+            : lowered.includes('vlc') ? 'VLC'
+            : lowered.includes('cfnetwork') ? 'Apple Client'
+                : lowered.includes('safari') ? 'Safari'
+                    : lowered.includes('okhttp') ? 'Android Client'
+                        : 'Unknown';
+    const deviceName = lowered.includes('iphone') ? 'iPhone'
+        : lowered.includes('ipad') ? 'iPad'
+            : lowered.includes('appletv') ? 'Apple TV'
+                : lowered.includes('android') && lowered.includes('tv') ? 'Android TV'
+                    : lowered.includes('android') ? 'Android Device'
+                        : lowered.includes('windows') ? 'Windows PC'
+                            : lowered.includes('macintosh') || lowered.includes('mac os') ? 'Mac'
+                                : lowered.includes('linux') ? 'Linux Device'
+                                    : lowered.includes('curl') ? 'Command Line Client'
+                                        : lowered.includes('cfnetwork') ? 'Apple Network Client'
+                                            : 'Unknown Device';
+
+    return {
+        raw: ua || 'unknown',
+        app,
+        deviceType,
+        platform,
+        deviceName,
+    };
+}
+
+function currentRequestContext() {
+    return requestContextStore.getStore() || null;
+}
+
+function recordLog(level, args) {
+    const context = currentRequestContext();
+    const entry = {
+        id: crypto.randomUUID(),
+        timestamp: nowIso(),
+        level,
+        message: formatConsoleArgs(args),
+        path: context?.path || null,
+        method: context?.method || null,
+        deviceId: context?.deviceId || null,
+        clientIp: context?.clientIp || null,
+    };
+
+    monitorState.logs.push(entry);
+    trimArray(monitorState.logs, LOG_LIMIT);
+    if (level === 'error') {
+        monitorState.errors.push(entry);
+        trimArray(monitorState.errors, ERROR_LIMIT);
+    }
+    touchMonitorState();
+}
+
+function patchConsole() {
+    if (console.__northstarMonitorPatched) {
+        return;
+    }
+
+    const original = {
+        log: console.log.bind(console),
+        warn: console.warn.bind(console),
+        error: console.error.bind(console),
+    };
+
+    console.log = (...args) => {
+        recordLog('info', args);
+        original.log(...args);
+    };
+
+    console.warn = (...args) => {
+        recordLog('warn', args);
+        original.warn(...args);
+    };
+
+    console.error = (...args) => {
+        recordLog('error', args);
+        original.error(...args);
+    };
+
+    console.__northstarMonitorPatched = true;
+}
+
+function registerDevice(req) {
+    const userAgent = req.headers['user-agent'] || '';
+    const ip = getRequestIp(req);
+    const fingerprint = crypto
+        .createHash('sha1')
+        .update(`${userAgent}|${ip}`)
+        .digest('hex')
+        .slice(0, 16);
+    const inferred = inferDevice(userAgent);
+    const existing = monitorState.devices.get(fingerprint);
+    const base = existing || {
+        id: fingerprint,
+        firstSeenAt: nowIso(),
+        requestCount: 0,
+    };
+
+    const device = {
+        ...base,
+        lastSeenAt: nowIso(),
+        requestCount: base.requestCount + 1,
+        ip,
+        app: inferred.app,
+        deviceType: inferred.deviceType,
+        platform: inferred.platform,
+        deviceName: inferred.deviceName,
+        clientName: `${inferred.app} on ${inferred.deviceName}`,
+        userAgent: inferred.raw,
+        host: req.headers.host || null,
+        lastPath: req.path || req.originalUrl || null,
+    };
+
+    monitorState.devices.set(fingerprint, device);
+    if (monitorState.devices.size > DEVICE_LIMIT) {
+        const oldestKey = [...monitorState.devices.entries()]
+            .sort((a, b) => new Date(a[1].lastSeenAt) - new Date(b[1].lastSeenAt))[0]?.[0];
+        if (oldestKey) {
+            monitorState.devices.delete(oldestKey);
+        }
+    }
+
+    touchMonitorState();
+    return device;
+}
+
+function recordActivity(event) {
+    const context = currentRequestContext();
+    const entry = {
+        id: crypto.randomUUID(),
+        timestamp: nowIso(),
+        deviceId: context?.deviceId || null,
+        clientIp: context?.clientIp || null,
+        app: context?.app || null,
+        platform: context?.platform || null,
+        ...event,
+    };
+
+    monitorState.activity.push(entry);
+    trimArray(monitorState.activity, ACTIVITY_LIMIT);
+    touchMonitorState();
+}
+
+function buildSummary() {
+    const devices = [...monitorState.devices.values()];
+    const activeDevices = devices.filter((device) => {
+        return Date.now() - new Date(device.lastSeenAt).getTime() < 1000 * 60 * 30;
+    }).length;
+
+    return {
+        startedAt: monitorState.startedAt,
+        lastUpdatedAt: monitorState.lastUpdatedAt,
+        totalDevices: devices.length,
+        activeDevices,
+        recentActivityCount: getCurrentlyPlaying().length,
+        recentErrorCount: monitorState.errors.length,
+        recentLogCount: monitorState.logs.length,
+        providers: providers.map((provider) => provider.name),
+        paused: controlState.paused,
+        stopped: controlState.stopped,
+    };
+}
+
+function prunePlaybackSessions() {
+    const sessions = [...monitorState.playbackSessions.values()]
+        .sort((a, b) => new Date(b.lastActivityAt || b.startedAt) - new Date(a.lastActivityAt || a.startedAt));
+    const keepIds = new Set(sessions.slice(0, PLAYBACK_SESSION_LIMIT).map((session) => session.id));
+    for (const key of monitorState.playbackSessions.keys()) {
+        if (!keepIds.has(key)) {
+            monitorState.playbackSessions.delete(key);
+        }
+    }
+}
+
+function createPlaybackSession(data) {
+    const session = {
+        id: crypto.randomUUID(),
+        startedAt: nowIso(),
+        lastActivityAt: null,
+        active: false,
+        proxyHits: 0,
+        ...data,
+    };
+    monitorState.playbackSessions.set(session.id, session);
+    prunePlaybackSessions();
+    touchMonitorState();
+    return session;
+}
+
+function touchPlaybackSession(sessionId) {
+    const session = monitorState.playbackSessions.get(sessionId);
+    if (!session) {
+        return null;
+    }
+    const updated = {
+        ...session,
+        active: true,
+        proxyHits: session.proxyHits + 1,
+        lastActivityAt: nowIso(),
+    };
+    monitorState.playbackSessions.set(sessionId, updated);
+    touchMonitorState();
+    return updated;
+}
+
+function getCurrentlyPlaying() {
+    const cutoff = Date.now() - PLAYBACK_ACTIVE_WINDOW_MS;
+    return [...monitorState.playbackSessions.values()]
+        .filter((session) => session.proxyHits > 0 && session.lastActivityAt && new Date(session.lastActivityAt).getTime() >= cutoff)
+        .map((session) => ({
+            ...session,
+            activeForSeconds: Math.max(
+                0,
+                Math.floor((new Date(session.lastActivityAt).getTime() - new Date(session.startedAt).getTime()) / 1000)
+            ),
+        }))
+        .sort((a, b) => new Date(b.lastActivityAt) - new Date(a.lastActivityAt));
+}
+
+function getRecentlyPlayed() {
+    const cutoff = Date.now() - PLAYBACK_RECENT_WINDOW_MS;
+    return [...monitorState.playbackSessions.values()]
+        .filter((session) => session.proxyHits > 0 && session.lastActivityAt && new Date(session.lastActivityAt).getTime() >= cutoff)
+        .map((session) => ({
+            ...session,
+            activeForSeconds: Math.max(
+                0,
+                Math.floor((new Date(session.lastActivityAt).getTime() - new Date(session.startedAt).getTime()) / 1000)
+            ),
+        }))
+        .sort((a, b) => new Date(b.lastActivityAt) - new Date(a.lastActivityAt));
+}
+
+function serverMode() {
+    if (controlState.stopped) {
+        return 'stopped';
+    }
+    if (controlState.paused) {
+        return 'paused';
+    }
+    return 'running';
+}
+
+function serverIsBlockingStreams() {
+    return controlState.paused || controlState.stopped;
+}
+
+function providerEnabled(name) {
+    return controlState.providers.get(name)?.enabled !== false;
+}
+
+function setProviderEnabled(name, enabled) {
+    const existing = controlState.providers.get(name);
+    if (!existing) {
+        return false;
+    }
+    controlState.providers.set(name, { ...existing, enabled: Boolean(enabled) });
+    touchMonitorState();
+    return true;
+}
+
+function normalizePlayerName(value) {
+    const player = String(value || '').trim();
+    return player || 'Unknown';
+}
+
+function playerEnabled(name) {
+    return controlState.players.get(normalizePlayerName(name))?.enabled !== false;
+}
+
+function setPlayerEnabled(name, enabled) {
+    const playerName = normalizePlayerName(name);
+    const existing = controlState.players.get(playerName) || { enabled: true, lastSeenAt: null, seenCount: 0 };
+    controlState.players.set(playerName, { ...existing, enabled: Boolean(enabled) });
+    touchMonitorState();
+}
+
+function notePlayerSeen(name) {
+    const playerName = normalizePlayerName(name);
+    const existing = controlState.players.get(playerName) || { enabled: true, lastSeenAt: null, seenCount: 0 };
+    controlState.players.set(playerName, {
+        ...existing,
+        lastSeenAt: nowIso(),
+        seenCount: existing.seenCount + 1,
+    });
+    touchMonitorState();
+}
+
+function inferPlayerFromStream(stream) {
+    const candidates = [
+        stream.player,
+        stream.behaviorHints?.player,
+        stream.name,
+        stream.title,
+        stream.url,
+    ].filter(Boolean).map((value) => String(value));
+
+    for (const candidate of candidates) {
+        if (/dood/i.test(candidate)) return 'DoodStream';
+        if (/filelions|vidhide/i.test(candidate)) return 'FileLions';
+        if (/mixdrop/i.test(candidate)) return 'Mixdrop';
+        if (/streamtape|strcloud/i.test(candidate)) return 'Streamtape';
+        if (/strp2p|p2pplay|4meplayer|upns\.pro/i.test(candidate)) return 'StrP2P';
+        if (/streamembed|gxplayer|bullstream|mp4player/i.test(candidate)) return 'StreamEmbed';
+        if (/dropload/i.test(candidate)) return 'Dropload';
+        if (/emturbovid|turbovid/i.test(candidate)) return 'Emturbovid';
+        if (/vidora|waaw/i.test(candidate)) return 'Vidora';
+        if (/vimeos/i.test(candidate)) return 'Vimeos';
+        if (/vidsrc/i.test(candidate)) return 'VidSrc';
+        if (/fastream/i.test(candidate)) return 'Fastream';
+    }
+
+    return normalizePlayerName(stream.player);
+}
+
+function buildControlsPayload() {
+    return {
+        paused: controlState.paused,
+        stopped: controlState.stopped,
+        mode: serverMode(),
+        providers: providers.map((provider) => {
+            const state = controlState.providers.get(provider.name) || { enabled: true, available: true };
+            return {
+                name: provider.name,
+                enabled: state.enabled,
+                available: state.available !== false,
+            };
+        }),
+        players: [...controlState.players.entries()]
+            .map(([name, state]) => ({
+                name,
+                enabled: state.enabled !== false,
+                seenCount: state.seenCount || 0,
+                lastSeenAt: state.lastSeenAt || null,
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+}
+
+function monitorAuth(req, res, next) {
+    if (!MONITOR_TOKEN) {
+        return next();
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const headerToken = req.headers['x-monitor-token'];
+    const token = bearerToken || headerToken;
+
+    if (token !== MONITOR_TOKEN) {
+        return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    return next();
+}
+
+patchConsole();
+
+process.on('unhandledRejection', (reason) => {
+    console.error('[process] unhandledRejection', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('[process] uncaughtException', error);
+});
 
 function withTimeout(promise, ms, fallback) {
     return Promise.race([
@@ -30,20 +515,18 @@ if (fs.existsSync(pDir)) {
             console.log(`Found provider file: ${f}`);
         }
 
-        if (activeProviders.has(base)) {
-            try {
-                const p = require(path.join(pDir, f));
-                if (p.getStreams) {
-                    providers.push({ name: base, getStreams: p.getStreams });
-                    console.log(`Loaded provider: ${base}`);
-                } else if (!IS_PROD) {
-                    console.log(`Skipped ${base}: no getStreams`);
-                }
-            } catch (e) {
-                console.error(`Failed loading ${base}:`, e.message);
+        try {
+            const p = require(path.join(pDir, f));
+            if (p.getStreams) {
+                providers.push({ name: base, getStreams: p.getStreams });
+                controlState.providers.set(base, { enabled: activeProviders.has(base), available: true });
+                console.log(`${activeProviders.has(base) ? 'Loaded' : 'Registered'} provider: ${base}`);
+            } else if (!IS_PROD) {
+                console.log(`Skipped ${base}: no getStreams`);
             }
-        } else if (!IS_PROD) {
-            console.log(`Not allowed: ${base}`);
+        } catch (e) {
+            controlState.providers.set(base, { enabled: false, available: false });
+            console.error(`Failed loading ${base}:`, e.message);
         }
     });
 }
@@ -82,10 +565,14 @@ function requestBase(req) {
     return ADDON_BASE;
 }
 
-function proxyWrap(url, headers) {
+function proxyWrap(url, headers, extraParams = {}) {
     const encodedUrl = encodeURIComponent(url);
     const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
-    const proxyPath = `/proxy?url=${encodedUrl}&headers=${encodedHeaders}`;
+    const extraQuery = Object.entries(extraParams)
+        .filter(([, value]) => value != null && value !== '')
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&');
+    const proxyPath = `/proxy?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`;
     const base = requestBase();
     return base ? `${base}${proxyPath}` : proxyPath;
 }
@@ -236,23 +723,53 @@ const builder = new addonBuilder({
 });
 
 builder.defineStreamHandler(async ({ type, id }) => {
+    const requestContext = currentRequestContext();
+    if (serverIsBlockingStreams()) {
+        recordActivity({
+            eventType: 'stream_lookup_blocked',
+            type,
+            reason: controlState.stopped ? 'server_stopped' : 'server_paused',
+            requestPath: requestContext?.path || null,
+        });
+        return { streams: [] };
+    }
     if (!IS_PROD) {
         console.log('[stream handler] LAST_HOST =', LAST_HOST, 'ADDON_BASE =', ADDON_BASE, 'PUBLIC_ADDON_BASE =', PUBLIC_ADDON_BASE);
     }
     const [imdbId, season, episode] = id.split(":");
     let tmdbId = null;
+    let metaName = null;
     try {
         const { data } = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`);
         tmdbId = data.meta.moviedb_id;
+        metaName = data.meta.name || null;
     } catch (e) {}
     
-    if (!tmdbId) return { streams: [] };
+    if (!tmdbId) {
+        recordActivity({
+            eventType: 'stream_lookup_failed',
+            type,
+            imdbId,
+            season: season || null,
+            episode: episode || null,
+            title: metaName,
+            reason: 'missing_tmdb_id',
+            requestPath: requestContext?.path || null,
+        });
+        return { streams: [] };
+    }
 
     // Convert series to tv
     const mediaType = type === "series" ? "tv" : "movie";
+    const enabledProviders = providers.filter((provider) => providerEnabled(provider.name));
     const results = await Promise.all(
-        providers.map((provider) => withTimeout(
-            Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode)).catch(() => []),
+        enabledProviders.map((provider) => withTimeout(
+            Promise.resolve(provider.getStreams(tmdbId, mediaType, season, episode))
+                .then((streams) => Array.isArray(streams)
+                    ? streams.map((stream) => ({ ...stream, provider: stream.provider || provider.name }))
+                    : []
+                )
+                .catch(() => []),
             TIMEOUT_MS,
             []
         ))
@@ -260,6 +777,15 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     const streams = (Array.isArray(results) ? results.flat() : [])
         .filter(s => s && s.url)
+        .map((stream) => {
+            const player = inferPlayerFromStream(stream);
+            notePlayerSeen(player);
+            return {
+                ...stream,
+                player,
+            };
+        })
+        .filter((stream) => playerEnabled(stream.player))
         .sort((a, b) => {
             const priorityDiff = streamPriority(b) - streamPriority(a);
             if (priorityDiff !== 0) {
@@ -278,7 +804,25 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
             // route the stream through our local proxy so that headers/cookies are
             // consistently applied even for playlist/segment requests
-            const proxiedUrl = proxyWrap(s.url, finalHeaders);
+            const playbackSession = createPlaybackSession({
+                title: metaName || s.title || 'Unknown title',
+                type,
+                mediaType,
+                imdbId,
+                tmdbId,
+                season: season || null,
+                episode: episode || null,
+                deviceId: requestContext?.deviceId || null,
+                clientIp: requestContext?.clientIp || null,
+                app: requestContext?.app || null,
+                platform: requestContext?.platform || null,
+                deviceName: monitorState.devices.get(requestContext?.deviceId || '')?.deviceName || null,
+                clientName: monitorState.devices.get(requestContext?.deviceId || '')?.clientName || null,
+                provider: s.provider || null,
+                player: s.player || null,
+            });
+
+            const proxiedUrl = proxyWrap(s.url, finalHeaders, { sid: playbackSession.id });
 
             return {
                 name: s.name || "Source",
@@ -286,12 +830,26 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 url: proxiedUrl,
                 subtitles: s.subtitles || [],
                 behaviorHints: {
-                    notWebReady: true
-                }
+                    notWebReady: true,
+                    player: s.player || null,
+                    provider: s.provider || null,
+                },
             };
         });
 
     console.log(`Sending ${streams.length} streams`);
+    recordActivity({
+        eventType: 'stream_lookup',
+        type,
+        mediaType,
+        imdbId,
+        tmdbId,
+        season: season || null,
+        episode: episode || null,
+        title: metaName,
+        streamCount: streams.length,
+        requestPath: requestContext?.path || null,
+    });
     return { streams };
 });
 
@@ -305,13 +863,29 @@ function startServer(addonInterface, opts = {}) {
         console.warn('cacheMaxAge set to more then 1 year, be advised that cache times are in seconds, not milliseconds.');
 
     const app = express();
+    app.use(express.json());
 
     // record host header early for use in stream handler
     app.use((req, res, next) => {
-        if (req.headers && req.headers.host) {
-            LAST_HOST = req.headers.host;
-        }
-        next();
+        const device = registerDevice(req);
+        const context = {
+            requestId: crypto.randomUUID(),
+            method: req.method,
+            path: req.path,
+            originalUrl: req.originalUrl,
+            host: req.headers.host || null,
+            clientIp: device.ip,
+            deviceId: device.id,
+            app: device.app,
+            platform: device.platform,
+        };
+
+        requestContextStore.run(context, () => {
+            if (req.headers && req.headers.host) {
+                LAST_HOST = req.headers.host;
+            }
+            next();
+        });
     });
 
     // cache-control (copied from serveHTTP)
@@ -325,8 +899,111 @@ function startServer(addonInterface, opts = {}) {
         res.json({
             ok: true,
             addon: builder.getInterface().manifest.name,
-            providers: providers.map(p => p.name)
+            paused: controlState.paused,
+            stopped: controlState.stopped,
+            providers: providers.filter((provider) => providerEnabled(provider.name)).map(p => p.name)
         });
+    });
+
+    app.get('/monitor/summary', monitorAuth, (_, res) => {
+        res.json(buildSummary());
+    });
+
+    app.get('/monitor/devices', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 100, DEVICE_LIMIT));
+        const devices = [...monitorState.devices.values()]
+            .sort((a, b) => new Date(b.lastSeenAt) - new Date(a.lastSeenAt))
+            .slice(0, limit);
+        res.json({ devices });
+    });
+
+    app.get('/monitor/activity', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 100, ACTIVITY_LIMIT));
+        res.json({ activity: monitorState.activity.slice(-limit).reverse() });
+    });
+
+    app.get('/monitor/currently-playing', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, PLAYBACK_SESSION_LIMIT));
+        res.json({ sessions: getCurrentlyPlaying().slice(0, limit) });
+    });
+
+    app.get('/monitor/recently-played', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, PLAYBACK_SESSION_LIMIT));
+        res.json({ sessions: getRecentlyPlayed().slice(0, limit) });
+    });
+
+    app.get('/monitor/logs', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 100, LOG_LIMIT));
+        res.json({ logs: monitorState.logs.slice(-limit).reverse() });
+    });
+
+    app.get('/monitor/errors', monitorAuth, (req, res) => {
+        const limit = Math.max(1, Math.min(Number(req.query.limit) || 100, ERROR_LIMIT));
+        res.json({ errors: monitorState.errors.slice(-limit).reverse() });
+    });
+
+    app.get('/monitor/controls', monitorAuth, (_, res) => {
+        res.json(buildControlsPayload());
+    });
+
+    app.post('/monitor/controls/pause', monitorAuth, (req, res) => {
+        controlState.paused = Boolean(req.body?.paused);
+        if (!controlState.paused) {
+            controlState.stopped = false;
+        }
+        touchMonitorState();
+        recordActivity({
+            eventType: controlState.paused ? 'server_paused' : 'server_resumed',
+            source: 'monitor_controls',
+        });
+        res.json(buildControlsPayload());
+    });
+
+    app.post('/monitor/controls/state', monitorAuth, (req, res) => {
+        const action = String(req.body?.action || '').trim().toLowerCase();
+        if (action === 'play') {
+            controlState.paused = false;
+            controlState.stopped = false;
+            recordActivity({ eventType: 'server_resumed', source: 'monitor_controls' });
+        } else if (action === 'pause') {
+            controlState.paused = true;
+            controlState.stopped = false;
+            recordActivity({ eventType: 'server_paused', source: 'monitor_controls' });
+        } else if (action === 'stop') {
+            controlState.paused = false;
+            controlState.stopped = true;
+            recordActivity({ eventType: 'server_stopped', source: 'monitor_controls' });
+        } else {
+            return res.status(400).json({ error: 'invalid_action' });
+        }
+        touchMonitorState();
+        return res.json(buildControlsPayload());
+    });
+
+    app.post('/monitor/controls/providers/:name', monitorAuth, (req, res) => {
+        const name = String(req.params.name || '').trim();
+        if (!setProviderEnabled(name, req.body?.enabled)) {
+            return res.status(404).json({ error: 'provider_not_found' });
+        }
+        recordActivity({
+            eventType: 'provider_toggled',
+            source: 'monitor_controls',
+            provider: name,
+            enabled: providerEnabled(name),
+        });
+        return res.json(buildControlsPayload());
+    });
+
+    app.post('/monitor/controls/players/:name', monitorAuth, (req, res) => {
+        const playerName = decodeURIComponent(String(req.params.name || '').trim());
+        setPlayerEnabled(playerName, req.body?.enabled);
+        recordActivity({
+            eventType: 'player_toggled',
+            source: 'monitor_controls',
+            player: normalizePlayerName(playerName),
+            enabled: playerEnabled(playerName),
+        });
+        return res.json(buildControlsPayload());
     });
 
     app.use('/Assets', express.static(path.join(__dirname, 'Assets')));
@@ -374,10 +1051,18 @@ const PORT = process.env.PORT || 7010;
 startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
     ADDON_BASE = PUBLIC_ADDON_BASE || '';
     console.log('addon base url:', ADDON_BASE);
+    console.log(`[monitor] token ${maskToken(MONITOR_TOKEN)}`);
 
     const app = server._events.request;
 
     const proxyHandler = async (req, res) => {
+        if (serverIsBlockingStreams()) {
+            return res.status(503).send('server paused');
+        }
+        const sessionId = req.query.sid ? String(req.query.sid) : '';
+        if (sessionId) {
+            touchPlaybackSession(sessionId);
+        }
         try {
             let targetUrl = req.query.url && decodeURIComponent(req.query.url);
             if (!targetUrl) return res.status(400).send('missing url');
@@ -495,6 +1180,9 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
     app.get('/proxy/hls/manifest.m3u8', proxyHandler);
 
     app.get('/extractor/video', async (req, res) => {
+        if (serverIsBlockingStreams()) {
+            return res.status(503).json({ error: 'server paused' });
+        }
         try {
             const host = String(req.query.host || '').trim();
             const rawTarget = req.query.d && decodeURIComponent(req.query.d);
