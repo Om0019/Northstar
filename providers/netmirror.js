@@ -324,7 +324,6 @@ function getStreamingLinks(contentId, title, platform) {
   }).then(function(token) {
     const cookies = {
       "t_hash_t": globalCookieValue,
-      "user_token": "233123f803cf02184bf6c67e149cdd50",
       "ott": ott,
       "hd": "on"
     };
