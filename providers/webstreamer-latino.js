@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-13T12:57:37.667Z
+ * Generated: 2026-03-19T07:01:35.863Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -92,16 +92,15 @@ var DEFAULT_HEADERS = {
 var SOURCE_BASES = {
   cuevana: "https://ww1.cuevana3.is",
   cinehdplus: "https://cinehdplus.gratis",
-  cinecalidad: "https://www.cinecalidad.am",
   homecine: "https://www3.homecine.to",
   verhdlink: "https://verhdlink.cam",
-  tioplus: "https://tioplus.app",
-  verpeliculasultra: "https://verpeliculasultra.com"
+  tioplus: "https://tioplus.app"
 };
 
 // src/webstreamer-latino/http.js
 var import_axios = __toESM(require("axios"));
 var cookieJar = /* @__PURE__ */ new Map();
+var REQUEST_TIMEOUT_MS = Math.max(1e3, parseInt(process.env.WEBSTREAMER_LATINO_HTTP_TIMEOUT_MS || "15000", 10) || 15e3);
 function mergeHeaders(headers) {
   return __spreadValues(__spreadValues({}, DEFAULT_HEADERS), headers || {});
 }
@@ -159,7 +158,7 @@ function issueRequest(_0) {
       data: options.body,
       responseType: "text",
       maxRedirects: 5,
-      timeout: 15e3,
+      timeout: REQUEST_TIMEOUT_MS,
       validateStatus: () => true
     });
     storeCookies(url, response);
@@ -215,7 +214,7 @@ function fetchJson(_0) {
       data: options.body,
       responseType: "json",
       maxRedirects: 5,
-      timeout: 15e3,
+      timeout: REQUEST_TIMEOUT_MS,
       validateStatus: () => true
     });
     if (response.status < 200 || response.status >= 300) {
@@ -344,6 +343,22 @@ function buildTitle(tmdb, season, episode) {
 }
 function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   return __async(this, null, function* () {
+    const disabled = new Set(
+      String(process.env.WEBSTREAMER_LATINO_DISABLED_SOURCES || "").split(",").map((v) => v.trim().toLowerCase()).filter(Boolean)
+    );
+    const sourceTimeoutMs = Math.max(0, parseInt(process.env.WEBSTREAMER_LATINO_SOURCE_TIMEOUT_MS || "0", 10) || 0);
+    const withTimeout = (label, promise) => {
+      if (!sourceTimeoutMs) {
+        return promise;
+      }
+      return Promise.race([
+        promise,
+        new Promise((resolve) => setTimeout(() => {
+          console.warn(`[WebstreamerLatino] Source timed out after ${sourceTimeoutMs}ms: ${label}`);
+          resolve([]);
+        }, sourceTimeoutMs))
+      ]);
+    };
     yield Promise.allSettled([
       prewarmSource(SOURCE_BASES.cuevana),
       prewarmSource(SOURCE_BASES.cinecalidad),
@@ -352,14 +367,14 @@ function getLatinoSourceResults(tmdb, mediaType, season, episode) {
       prewarmSource(SOURCE_BASES.verpeliculasultra)
     ]);
     const tasks = [
-      searchCuevana(tmdb, season, episode),
-      searchCineHdPlus(tmdb, mediaType, season, episode),
-      searchCineCalidad(tmdb, mediaType, season, episode),
-      searchHomeCine(tmdb, season, episode),
-      searchVerHdLink(tmdb, mediaType),
-      searchTioPlus(tmdb, mediaType, season, episode),
-      searchVerPeliculasUltra(tmdb, mediaType)
-    ];
+      !disabled.has("cuevana") && withTimeout("cuevana", searchCuevana(tmdb, season, episode)),
+      !disabled.has("cinehdplus") && withTimeout("cinehdplus", searchCineHdPlus(tmdb, mediaType, season, episode)),
+      !disabled.has("cinecalidad") && withTimeout("cinecalidad", searchCineCalidad(tmdb, mediaType, season, episode)),
+      !disabled.has("homecine") && withTimeout("homecine", searchHomeCine(tmdb, season, episode)),
+      !disabled.has("verhdlink") && withTimeout("verhdlink", searchVerHdLink(tmdb, mediaType)),
+      !disabled.has("tioplus") && withTimeout("tioplus", searchTioPlus(tmdb, mediaType, season, episode)),
+      !disabled.has("verpeliculasultra") && withTimeout("verpeliculasultra", searchVerPeliculasUltra(tmdb, mediaType))
+    ].filter(Boolean);
     const settled = yield Promise.allSettled(tasks);
     return settled.flatMap((result) => {
       if (result.status === "fulfilled") {

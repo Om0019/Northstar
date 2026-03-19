@@ -3,7 +3,7 @@ import { Request, Response, Router } from 'express';
 import { ContentType } from 'stremio-addon-sdk';
 import winston from 'winston';
 import { Source } from '../source';
-import { contextFromRequestAndResponse, envIsProd, Id, ImdbId, StreamResolver, TmdbId } from '../utils';
+import { contextFromRequestAndResponse, envGet, envIsProd, Id, ImdbId, StreamResolver, TmdbId } from '../utils';
 
 export class StreamController {
   public readonly router: Router;
@@ -13,6 +13,8 @@ export class StreamController {
   private readonly streamResolver: StreamResolver;
 
   private readonly locks = new Map<string, Mutex>();
+
+  private readonly streamCache = new Map<string, { expiresAt: number; payload: { streams: unknown } }>();
 
   public constructor(logger: winston.Logger, sources: Source[], streams: StreamResolver) {
     this.router = Router();
@@ -46,6 +48,12 @@ export class StreamController {
 
     const sources = this.sources.filter(source => source.countryCodes.filter(countryCode => countryCode in ctx.config).length);
 
+    const cacheTtlMs = parseInt(envGet('STREAM_CACHE_TTL_MS') || '0', 10) || 0;
+    const cacheMaxEntries = Math.max(0, parseInt(envGet('STREAM_CACHE_MAX_ENTRIES') || '500', 10) || 500);
+    const cacheKey = cacheTtlMs > 0
+      ? `${type}|${rawId}|${JSON.stringify(ctx.config)}`
+      : '';
+
     let mutex = this.locks.get(rawId);
     if (!mutex) {
       mutex = new Mutex();
@@ -53,6 +61,15 @@ export class StreamController {
     }
 
     await mutex.runExclusive(async () => {
+      if (cacheTtlMs > 0) {
+        const cached = this.streamCache.get(cacheKey);
+        if (cached && cached.expiresAt > Date.now()) {
+          res.setHeader('Content-Type', 'application/json');
+          res.send(JSON.stringify(cached.payload));
+          return;
+        }
+      }
+
       const { streams, ttl } = await this.streamResolver.resolve(ctx, sources, type, id);
 
       if (ttl && envIsProd()) {
@@ -60,7 +77,19 @@ export class StreamController {
       }
 
       res.setHeader('Content-Type', 'application/json');
-      res.send(JSON.stringify({ streams }));
+      const payload = { streams };
+      res.send(JSON.stringify(payload));
+
+      if (cacheTtlMs > 0) {
+        // best-effort bounded cache
+        if (this.streamCache.size >= cacheMaxEntries) {
+          const firstKey = this.streamCache.keys().next().value as string | undefined;
+          if (firstKey) {
+            this.streamCache.delete(firstKey);
+          }
+        }
+        this.streamCache.set(cacheKey, { expiresAt: Date.now() + cacheTtlMs, payload });
+      }
     });
 
     if (!mutex.isLocked()) {

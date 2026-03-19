@@ -632,7 +632,11 @@ async function canResolveHost(hostname) {
     }
 
     try {
-        await dns.lookup(hostname);
+        // dns.lookup can block for a while on some networks/devices; cap it.
+        await Promise.race([
+            dns.lookup(hostname),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('dns_timeout')), 750)),
+        ]);
         dnsReachabilityCache.set(hostname, { ok: true, expiresAt: now + 5 * 60 * 1000 });
         return true;
     } catch (_error) {
@@ -643,33 +647,60 @@ async function canResolveHost(hostname) {
 
 async function pruneDeadHlsVariants(playlistText, baseUrl) {
     const lines = playlistText.split('\n');
-    const kept = [];
+    const variantChecks = [];
 
     for (let i = 0; i < lines.length; i += 1) {
+        const trimmed = (lines[i] || '').trim();
+        if (!trimmed.startsWith('#EXT-X-STREAM-INF')) {
+            continue;
+        }
+
+        const nextLine = lines[i + 1] || '';
+        const nextTrimmed = nextLine.trim();
+        if (!nextTrimmed || nextTrimmed.startsWith('#')) {
+            continue;
+        }
+
+        let hostname = '';
+        try {
+            hostname = new URL(nextTrimmed, baseUrl).hostname;
+        } catch (_error) {
+            hostname = '';
+        }
+
+        variantChecks.push({ idx: i, hostname });
+        i += 1;
+    }
+
+    const okByIdx = new Map();
+    await Promise.all(variantChecks.map(async ({ idx, hostname }) => {
+        if (!hostname) {
+            okByIdx.set(idx, true);
+            return;
+        }
+        const ok = await canResolveHost(hostname);
+        okByIdx.set(idx, ok);
+        if (!ok) {
+            console.log(`[proxy] dropping unreachable HLS variant host ${hostname}`);
+        }
+    }));
+
+    const kept = [];
+    for (let i = 0; i < lines.length; i += 1) {
         const line = lines[i];
-        const trimmed = line.trim();
+        const trimmed = (line || '').trim();
 
         if (trimmed.startsWith('#EXT-X-STREAM-INF')) {
             const nextLine = lines[i + 1] || '';
-            const nextTrimmed = nextLine.trim();
-            if (!nextTrimmed || nextTrimmed.startsWith('#')) {
-                kept.push(line);
+            const ok = okByIdx.get(i);
+            if (ok === false) {
+                i += 1; // drop variant URI line as well
                 continue;
             }
-
-            let hostname = '';
-            try {
-                hostname = new URL(nextTrimmed, baseUrl).hostname;
-            } catch (_error) {
-                hostname = '';
+            kept.push(line);
+            if (nextLine !== undefined) {
+                kept.push(nextLine);
             }
-
-            if (!hostname || await canResolveHost(hostname)) {
-                kept.push(line, nextLine);
-            } else {
-                console.log(`[proxy] dropping unreachable HLS variant host ${hostname}`);
-            }
-
             i += 1;
             continue;
         }
@@ -834,7 +865,14 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 player: s.player || null,
             });
 
-            const isHls = String(s.type || '').toLowerCase() === 'hls' || String(s.url || '').toLowerCase().includes('.m3u8');
+            const urlLower = String(s.url || '').toLowerCase();
+            const providerLower = String(s.provider || '').toLowerCase();
+            const nameLower = String(s.name || '').toLowerCase();
+            const isHls = String(s.type || '').toLowerCase() === 'hls'
+                || urlLower.includes('.m3u8')
+                // vixsrc often returns playlist URLs without .m3u8 extension
+                || providerLower === 'vixsrc'
+                || nameLower.includes('vixsrc');
             const proxiedUrl = isHls
                 ? proxyWrapHls(s.url, finalHeaders, { sid: playbackSession.id })
                 : proxyWrap(s.url, finalHeaders, { sid: playbackSession.id });

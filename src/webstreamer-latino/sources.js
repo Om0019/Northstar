@@ -19,6 +19,27 @@ function buildTitle(tmdb, season, episode) {
 }
 
 export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
+  const disabled = new Set(
+    String(process.env.WEBSTREAMER_LATINO_DISABLED_SOURCES || '')
+      .split(',')
+      .map(v => v.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const sourceTimeoutMs = Math.max(0, parseInt(process.env.WEBSTREAMER_LATINO_SOURCE_TIMEOUT_MS || '0', 10) || 0);
+
+  const withTimeout = (label, promise) => {
+    if (!sourceTimeoutMs) {
+      return promise;
+    }
+    return Promise.race([
+      promise,
+      new Promise(resolve => setTimeout(() => {
+        console.warn(`[WebstreamerLatino] Source timed out after ${sourceTimeoutMs}ms: ${label}`);
+        resolve([]);
+      }, sourceTimeoutMs)),
+    ]);
+  };
+
   await Promise.allSettled([
     prewarmSource(SOURCE_BASES.cuevana),
     prewarmSource(SOURCE_BASES.cinecalidad),
@@ -28,14 +49,14 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
   ]);
 
   const tasks = [
-    searchCuevana(tmdb, season, episode),
-    searchCineHdPlus(tmdb, mediaType, season, episode),
-    searchCineCalidad(tmdb, mediaType, season, episode),
-    searchHomeCine(tmdb, season, episode),
-    searchVerHdLink(tmdb, mediaType),
-    searchTioPlus(tmdb, mediaType, season, episode),
-    searchVerPeliculasUltra(tmdb, mediaType),
-  ];
+    !disabled.has('cuevana') && withTimeout('cuevana', searchCuevana(tmdb, season, episode)),
+    !disabled.has('cinehdplus') && withTimeout('cinehdplus', searchCineHdPlus(tmdb, mediaType, season, episode)),
+    !disabled.has('cinecalidad') && withTimeout('cinecalidad', searchCineCalidad(tmdb, mediaType, season, episode)),
+    !disabled.has('homecine') && withTimeout('homecine', searchHomeCine(tmdb, season, episode)),
+    !disabled.has('verhdlink') && withTimeout('verhdlink', searchVerHdLink(tmdb, mediaType)),
+    !disabled.has('tioplus') && withTimeout('tioplus', searchTioPlus(tmdb, mediaType, season, episode)),
+    !disabled.has('verpeliculasultra') && withTimeout('verpeliculasultra', searchVerPeliculasUltra(tmdb, mediaType)),
+  ].filter(Boolean);
 
   const settled = await Promise.allSettled(tasks);
 

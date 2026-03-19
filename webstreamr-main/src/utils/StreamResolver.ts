@@ -7,7 +7,7 @@ import { ExtractorRegistry } from '../extractor';
 import { Source } from '../source';
 import { Context, CountryCode, Format, UrlResult } from '../types';
 import { showErrors, showExternalUrls } from './config';
-import { envGetAppName } from './env';
+import { envGet, envGetAppName } from './env';
 import { Id } from './id';
 import { flagFromCountryCode } from './language';
 
@@ -50,11 +50,26 @@ export class StreamResolver {
 
     const skippedFallbackSources: Source[] = [];
 
+    const extractorTimeoutMsRaw = parseInt(envGet('EXTRACTOR_TIMEOUT_MS') || '0', 10) || 0;
+    const extractorTimeoutMs = extractorTimeoutMsRaw > 0 ? extractorTimeoutMsRaw : 0;
+
     const handleSource = async (source: Source, countUrlResultsByCountryCode: boolean) => {
       try {
         const sourceResults = await source.handle(ctx, type, id);
         const sourceUrlResults = await Promise.all(
-          sourceResults.map(({ url, meta }) => this.extractorRegistry.handle(ctx, url, { sourceLabel: source.label, sourceId: source.id, priority: source.priority, ...meta }, true)),
+          sourceResults.map(({ url, meta }) => {
+            const task = this.extractorRegistry.handle(ctx, url, { sourceLabel: source.label, sourceId: source.id, priority: source.priority, ...meta }, true);
+            if (!extractorTimeoutMs) {
+              return task;
+            }
+            return Promise.race([
+              task,
+              new Promise<UrlResult[]>(resolve => setTimeout(() => {
+                this.logger.warn(`Extractor timeout after ${extractorTimeoutMs}ms for ${url.href}`, ctx);
+                resolve([]);
+              }, extractorTimeoutMs)),
+            ]);
+          }),
         );
 
         for (const urlResult of sourceUrlResults.flat()) {
