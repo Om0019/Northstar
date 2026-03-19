@@ -324,6 +324,7 @@ function getStreamingLinks(contentId, title, platform) {
   }).then(function(token) {
     const cookies = {
       "t_hash_t": globalCookieValue,
+      "user_token": "233123f803cf02184bf6c67e149cdd50",
       "ott": ott,
       "hd": "on"
     };
@@ -362,7 +363,15 @@ function getStreamingLinks(contentId, title, platform) {
           sources.push({
             url: fullUrl,
             quality: source.label,
-            type: source.type || "application/x-mpegURL"
+            type: source.type || "application/x-mpegURL",
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Android) ExoPlayer",
+              "Accept": "*/*",
+              "Accept-Encoding": "identity",
+              "Connection": "keep-alive",
+              "Cookie": cookieString,
+              "Referer": `${NETMIRROR_PLAY}/`
+            }
           });
         });
       }
@@ -570,7 +579,7 @@ function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = 
                     streamTitle += ` - ${episodeName}`;
                   }
                 }
-                const streamHeaders = {
+                const streamHeaders = source.headers || {
                   "User-Agent": "Mozilla/5.0 (Android) ExoPlayer",
                   "Accept": "*/*",
                   "Accept-Encoding": "identity",
