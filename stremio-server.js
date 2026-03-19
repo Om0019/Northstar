@@ -1055,6 +1055,35 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
     const app = server._events.request;
 
+    function parseSetCookieToCookieHeader(setCookie) {
+        const cookies = Array.isArray(setCookie) ? setCookie : (setCookie ? [setCookie] : []);
+        const pairs = cookies
+            .map((value) => String(value).split(';')[0].trim())
+            .filter(Boolean);
+        return pairs.join('; ');
+    }
+
+    function mergeCookieStrings(a, b) {
+        const result = new Map();
+        const ingest = (value) => {
+            String(value || '')
+                .split(';')
+                .map((part) => part.trim())
+                .filter(Boolean)
+                .forEach((pair) => {
+                    const idx = pair.indexOf('=');
+                    if (idx <= 0) return;
+                    const name = pair.slice(0, idx).trim();
+                    const val = pair.slice(idx + 1).trim();
+                    if (!name) return;
+                    result.set(name, val);
+                });
+        };
+        ingest(a);
+        ingest(b);
+        return [...result.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+    }
+
     const proxyHandler = async (req, res) => {
         if (serverIsBlockingStreams()) {
             return res.status(503).send('server paused');
@@ -1085,8 +1114,12 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                 }
             })();
 
+            const session = sessionId ? monitorState.playbackSessions.get(sessionId) : null;
+            const sessionCookie = session && session.cookie ? session.cookie : '';
+            const upstreamCookie = mergeCookieStrings(headers.Cookie || headers.cookie || '', sessionCookie);
             const upstreamHeaders = {
                 ...headers,
+                ...(upstreamCookie ? { Cookie: upstreamCookie } : {}),
                 ...(req.headers.range ? { Range: req.headers.range } : {}),
                 ...(req.headers.accept ? { Accept: req.headers.accept } : {}),
             };
@@ -1099,6 +1132,22 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
             });
 
             console.log(`[proxy] ${req.method} ${targetHost} -> ${resp.status} ${resp.headers['content-type'] || 'unknown'}`);
+
+            // capture upstream cookies for subsequent HLS segment requests
+            if (sessionId) {
+                const setCookie = resp.headers['set-cookie'];
+                const newCookie = parseSetCookieToCookieHeader(setCookie);
+                if (newCookie) {
+                    const existing = monitorState.playbackSessions.get(sessionId);
+                    if (existing) {
+                        monitorState.playbackSessions.set(sessionId, {
+                            ...existing,
+                            cookie: mergeCookieStrings(existing.cookie || '', newCookie),
+                        });
+                        touchMonitorState();
+                    }
+                }
+            }
 
             // copy status and headers, but drop hop-by-hop / body-size headers
             // that become invalid once we rewrite playlist bodies.
@@ -1146,8 +1195,9 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
                         const eurl = encodeURIComponent(urlToProxy);
                         const eheaders = encodeURIComponent(JSON.stringify(headers));
+                        const sidPart = sessionId ? `&sid=${encodeURIComponent(sessionId)}` : '';
                         const prefix = requestBase(req);
-                        return prefix ? `${prefix}/proxy?url=${eurl}&headers=${eheaders}` : `/proxy?url=${eurl}&headers=${eheaders}`;
+                        return prefix ? `${prefix}/proxy?url=${eurl}&headers=${eheaders}${sidPart}` : `/proxy?url=${eurl}&headers=${eheaders}${sidPart}`;
                     };
 
                     // rewrite playlist lines: segment URLs plus URI attributes inside HLS tags

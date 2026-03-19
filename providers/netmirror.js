@@ -362,15 +362,7 @@ function getStreamingLinks(contentId, title, platform) {
           sources.push({
             url: fullUrl,
             quality: source.label,
-            type: source.type || "application/x-mpegURL",
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Android) ExoPlayer",
-              "Accept": "*/*",
-              "Accept-Encoding": "identity",
-              "Connection": "keep-alive",
-              "Cookie": cookieString,
-              "Referer": `${NETMIRROR_PLAY}/`
-            }
+            type: source.type || "application/x-mpegURL"
           });
         });
       }
@@ -578,7 +570,7 @@ function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = 
                     streamTitle += ` - ${episodeName}`;
                   }
                 }
-                const streamHeaders = source.headers || {
+                const streamHeaders = {
                   "User-Agent": "Mozilla/5.0 (Android) ExoPlayer",
                   "Accept": "*/*",
                   "Accept-Encoding": "identity",
