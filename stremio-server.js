@@ -811,6 +811,22 @@ function shouldRetryLatinoPlaybackHost(host) {
     return LATINO_RETRY_PLAYERS.has(String(host || '').toLowerCase());
 }
 
+function shouldBlockStream(stream) {
+    if (!stream) {
+        return false;
+    }
+
+    const provider = String(stream.provider || '').toLowerCase();
+    const source = String(stream.source || '').toLowerCase();
+    const player = String(stream.player || '').toLowerCase();
+
+    if (provider === 'webstreamer-latino' && source === 'cuevana' && player === 'filelions') {
+        return true;
+    }
+
+    return false;
+}
+
 async function probeResolvedLatinoStream(url, headers = {}) {
     try {
         const response = await axios({
@@ -1238,6 +1254,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             };
         })
         .filter((stream) => playerEnabled(stream.player))
+        .filter((stream) => !shouldBlockStream(stream))
         .sort((a, b) => {
             const mexicanFlagDiff = mexicanFlagOrderPriority(b) - mexicanFlagOrderPriority(a);
             if (mexicanFlagDiff !== 0) {
