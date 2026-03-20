@@ -726,7 +726,7 @@ function isLikelyHlsUrl(url, stream = null) {
     return false;
 }
 
-function mediaflowProxyWrap(req, url, headers, extraParams = {}) {
+function mediaflowProxyWrap(req, url, headers, extraParams = {}, stream = null) {
     const encodedUrl = encodeURIComponent(url);
     const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
     const extraQuery = Object.entries(extraParams)
@@ -734,7 +734,9 @@ function mediaflowProxyWrap(req, url, headers, extraParams = {}) {
         .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
         .join('&');
     const base = requestBase(req);
-    const proxyPath = `/proxy/hls/manifest.m3u8?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`;
+    const proxyPath = isLikelyHlsUrl(url, stream)
+        ? `/proxy/hls/manifest.m3u8?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`
+        : `/proxy?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`;
     return base ? `${base}${proxyPath}` : proxyPath;
 }
 
@@ -1746,7 +1748,7 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
             }
 
             const sid = req.query.sid ? String(req.query.sid) : '';
-            const proxyUrl = mediaflowProxyWrap(req, stream.url, stream.headers || headers, sid ? { sid } : {});
+            const proxyUrl = mediaflowProxyWrap(req, stream.url, stream.headers || headers, sid ? { sid } : {}, stream);
 
             const redirectMode = String(req.query.redirect_stream || '').toLowerCase();
             if (redirectMode !== 'false') {
