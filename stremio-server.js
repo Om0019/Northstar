@@ -923,6 +923,74 @@ function shouldBypassLatinoNestedProxy(baseUrl) {
     return /(turboviplay|turbovidhls|emturbovid|goodstream|vimeos|fastream|filelions|vidhide)/i.test(String(baseUrl || ''));
 }
 
+async function filterReachableHlsVariants(playlistText, baseUrl) {
+    const lines = playlistText.split('\n');
+    const variants = [];
+
+    for (let i = 0; i < lines.length; i += 1) {
+        const trimmed = (lines[i] || '').trim();
+        if (!trimmed.startsWith('#EXT-X-STREAM-INF')) {
+            continue;
+        }
+
+        const nextLine = lines[i + 1] || '';
+        const nextTrimmed = nextLine.trim();
+        if (!nextTrimmed || nextTrimmed.startsWith('#')) {
+            continue;
+        }
+
+        let hostname = '';
+        try {
+            hostname = new URL(nextTrimmed, baseUrl).hostname;
+        } catch (_error) {
+            hostname = '';
+        }
+
+        variants.push({ idx: i, hostname });
+        i += 1;
+    }
+
+    if (variants.length <= 1) {
+        return playlistText;
+    }
+
+    const okByIdx = new Map();
+    await Promise.all(variants.map(async ({ idx, hostname }) => {
+        if (!hostname) {
+            okByIdx.set(idx, true);
+            return;
+        }
+        okByIdx.set(idx, await canResolveHost(hostname));
+    }));
+
+    const hasReachableVariant = [...okByIdx.values()].some(Boolean);
+    if (!hasReachableVariant) {
+        return playlistText;
+    }
+
+    const kept = [];
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        const trimmed = (line || '').trim();
+
+        if (trimmed.startsWith('#EXT-X-STREAM-INF')) {
+            const nextLine = lines[i + 1] || '';
+            if (okByIdx.get(i) === false) {
+                i += 1;
+                continue;
+            }
+            kept.push(line);
+            kept.push(nextLine);
+            i += 1;
+            continue;
+        }
+
+        kept.push(line);
+    }
+
+    return kept.join('\n');
+}
+
 async function loadLatinoMediaflowResolver() {
     if (!latinoMediaflowModulePromise) {
         const modulePath = path.join(__dirname, 'src', 'webstreamer-latino', 'extractors.js');
@@ -950,14 +1018,14 @@ function streamPriority(stream) {
     switch (stream.provider) {
         case 'netmirror':
             return 300;
-        case 'webstreamer-latino':
-            return 200;
         case 'vidlink':
-            return 120;
+            return 220;
         case 'vixsrc':
-            return 110;
+            return 210;
         case 'yflix':
-            return 100;
+            return 200;
+        case 'webstreamer-latino':
+            return 120;
         case 'castle':
             return -100;
         default:
@@ -1474,10 +1542,14 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                 resp.data.on('end', async () => {
                     // Get base URL for resolving relative paths
                     const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-                    const sanitizedData = data.includes('#EXT-X-STREAM-INF')
+                    const isMasterPlaylist = data.includes('#EXT-X-STREAM-INF');
+                    let sanitizedData = isMasterPlaylist
                         ? await pruneDeadHlsVariants(data, baseUrl)
                         : data;
                     const bypassNestedProxy = shouldBypassLatinoNestedProxy(baseUrl);
+                    if (isMasterPlaylist && bypassNestedProxy) {
+                        sanitizedData = await filterReachableHlsVariants(sanitizedData, baseUrl);
+                    }
                     
                     const toAbsoluteUrl = (value) => {
                         if (value.startsWith('http://') || value.startsWith('https://')) {

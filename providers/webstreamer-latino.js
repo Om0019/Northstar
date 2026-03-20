@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-20T06:42:19.404Z
+ * Generated: 2026-03-20T07:02:08.315Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -1350,9 +1350,15 @@ function shouldProbePlayableStream(stream) {
 }
 function validatePlayableStreams(streams) {
   return __async(this, null, function* () {
+    const maxFragileProbes = 6;
+    let fragileProbeCount = 0;
     const validated = yield Promise.all(streams.map((stream) => __async(this, null, function* () {
       if (!shouldProbePlayableStream(stream)) {
         return stream;
+      }
+      fragileProbeCount += 1;
+      if (fragileProbeCount > maxFragileProbes) {
+        return null;
       }
       const ok = yield probePlaybackUrl(stream.url, stream.headers);
       if (!ok) {

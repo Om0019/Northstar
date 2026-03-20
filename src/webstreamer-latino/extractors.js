@@ -390,9 +390,17 @@ function shouldProbePlayableStream(stream) {
 }
 
 async function validatePlayableStreams(streams) {
+  const maxFragileProbes = 6;
+  let fragileProbeCount = 0;
+
   const validated = await Promise.all(streams.map(async (stream) => {
     if (!shouldProbePlayableStream(stream)) {
       return stream;
+    }
+
+    fragileProbeCount += 1;
+    if (fragileProbeCount > maxFragileProbes) {
+      return null;
     }
 
     const ok = await probePlaybackUrl(stream.url, stream.headers);
