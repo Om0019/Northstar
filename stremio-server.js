@@ -809,6 +809,11 @@ async function canResolveHost(hostname) {
 }
 
 async function pruneDeadHlsVariants(playlistText, baseUrl) {
+    const pruneOptOut = /(turboviplay|turbovidhls|emturbovid|goodstream|vimeos|fastream|filelions|vidhide)/i.test(String(baseUrl || ''));
+    if (pruneOptOut) {
+        return playlistText;
+    }
+
     const lines = playlistText.split('\n');
     const variantChecks = [];
 
