@@ -824,6 +824,16 @@ function shouldMarkMexicanFlag(stream) {
         return true;
     }
 
+    const audioLanguages = Array.isArray(stream.audioLanguages)
+        ? stream.audioLanguages.map((value) => String(value || '').toLowerCase())
+        : [];
+    if (audioLanguages.some((value) => /\blatino\b|\bes[-_ ]?mx\b|mexic|spa[-_ ]?lat/i.test(value))) {
+        return true;
+    }
+    if (audioLanguages.length > 0) {
+        return false;
+    }
+
     const language = String(stream.language || stream.contentLanguage || '').toLowerCase();
     if (language.includes('latino') || language.includes('es-mx') || language.includes('spa-lat')) {
         return true;

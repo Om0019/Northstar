@@ -52,6 +52,22 @@ function extractYear(value) {
   const match = String(value || "").match(/\b(19|20)\d{2}\b/);
   return match ? match[0] : null;
 }
+function collectAudioLanguages(item, source) {
+  const values = [
+    item == null ? void 0 : item.language,
+    item == null ? void 0 : item.lang,
+    item == null ? void 0 : item.audio,
+    item == null ? void 0 : item.audio_language,
+    item == null ? void 0 : item.audioLanguage,
+    source == null ? void 0 : source.language,
+    source == null ? void 0 : source.lang,
+    source == null ? void 0 : source.audio,
+    source == null ? void 0 : source.audio_language,
+    source == null ? void 0 : source.audioLanguage,
+    source == null ? void 0 : source.label
+  ];
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
 function scoreSearchResult(resultTitle, targetTitle, expectedYear) {
   const normalizedResult = normalizeTitle(resultTitle);
   const normalizedTarget = normalizeTitle(targetTitle);
@@ -402,7 +418,8 @@ function getStreamingLinks(contentId, title, platform) {
           sources.push({
             url: fullUrl,
             quality: source.label,
-            type: source.type || "application/x-mpegURL"
+            type: source.type || "application/x-mpegURL",
+            audioLanguages: collectAudioLanguages(item, source)
           });
         });
       }
@@ -616,6 +633,7 @@ function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = 
                   title: streamTitle,
                   url: source.url,
                   quality,
+                  audioLanguages: source.audioLanguages || [],
                   type: "hls",
                   headers: streamHeaders
                 };
