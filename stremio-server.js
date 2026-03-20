@@ -621,6 +621,27 @@ let LAST_HOST = '';    // updated by middleware for each incoming request
 const dnsReachabilityCache = new Map();
 let latinoMediaflowModulePromise = null;
 
+function forwardedProto(req) {
+    if (!req || !req.headers) {
+        return '';
+    }
+
+    const direct = req.headers['x-forwarded-proto'] || req.headers['x-forwarded-protocol'];
+    if (typeof direct === 'string' && direct.trim()) {
+        return direct.split(',')[0].trim().toLowerCase();
+    }
+
+    const forwarded = req.headers.forwarded;
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+        const match = forwarded.match(/proto=([^;,\s]+)/i);
+        if (match && match[1]) {
+            return match[1].trim().toLowerCase();
+        }
+    }
+
+    return '';
+}
+
 function requestBase(req) {
     if (PUBLIC_ADDON_BASE) {
         return PUBLIC_ADDON_BASE;
@@ -628,8 +649,7 @@ function requestBase(req) {
 
     const host = req && req.headers && req.headers.host;
     if (host) {
-        const proto = req.headers['x-forwarded-proto']
-            || req.headers['x-forwarded-protocol']
+        const proto = forwardedProto(req)
             || req.protocol
             || (host.includes('onrender.com') || host.includes('koyeb.app') ? 'https' : 'http');
         return `${proto}://${host}`;
@@ -643,7 +663,7 @@ function requestBase(req) {
     return ADDON_BASE;
 }
 
-function proxyWrap(url, headers, extraParams = {}) {
+function proxyWrap(req, url, headers, extraParams = {}) {
     const encodedUrl = encodeURIComponent(url);
     const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
     const extraQuery = Object.entries(extraParams)
@@ -651,11 +671,11 @@ function proxyWrap(url, headers, extraParams = {}) {
         .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
         .join('&');
     const proxyPath = `/proxy?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`;
-    const base = requestBase();
+    const base = requestBase(req);
     return base ? `${base}${proxyPath}` : proxyPath;
 }
 
-function proxyWrapHls(url, headers, extraParams = {}) {
+function proxyWrapHls(req, url, headers, extraParams = {}) {
     const encodedUrl = encodeURIComponent(url);
     const encodedHeaders = encodeURIComponent(JSON.stringify(headers || {}));
     const extraQuery = Object.entries(extraParams)
@@ -663,7 +683,7 @@ function proxyWrapHls(url, headers, extraParams = {}) {
         .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
         .join('&');
     const proxyPath = `/proxy/hls/manifest.m3u8?url=${encodedUrl}&headers=${encodedHeaders}${extraQuery ? `&${extraQuery}` : ''}`;
-    const base = requestBase();
+    const base = requestBase(req);
     return base ? `${base}${proxyPath}` : proxyPath;
 }
 
@@ -1245,15 +1265,15 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 || nameLower.includes('vixsrc');
             const proxiedUrl = shouldResolveLatinoOnDemand(s)
                 ? extractorWrap(
-                    null,
+                    req,
                     s.player,
                     s.extractorTarget,
                     s.extractorHeaders || providerHeaders,
                     { redirect_stream: 'true', sid: playbackSession.id }
                 )
                 : (isHls
-                    ? proxyWrapHls(s.url, finalHeaders, { sid: playbackSession.id })
-                    : proxyWrap(s.url, finalHeaders, { sid: playbackSession.id }));
+                    ? proxyWrapHls(req, s.url, finalHeaders, { sid: playbackSession.id })
+                    : proxyWrap(req, s.url, finalHeaders, { sid: playbackSession.id }));
 
             return {
                 name: s.name || "Source",
@@ -1294,6 +1314,7 @@ function startServer(addonInterface, opts = {}) {
         console.warn('cacheMaxAge set to more then 1 year, be advised that cache times are in seconds, not milliseconds.');
 
     const app = express();
+    app.set('trust proxy', true);
     app.use(express.json());
 
     // record host header early for use in stream handler
