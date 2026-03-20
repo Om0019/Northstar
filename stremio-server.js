@@ -759,7 +759,19 @@ function extractorWrap(req, host, targetUrl, headers = {}, extraParams = {}) {
         query.set(`h_${String(key).replace(/-/g, '_')}`, String(value));
     });
 
-    const path = `/extractor/video?${query.toString()}`;
+    const normalizedHost = String(host || '').trim().toLowerCase();
+    const playbackPath = [
+        'filelions',
+        'emturbovid',
+        'goodstream',
+        'fastream',
+        'vimeos',
+        'streamwish',
+        'voe',
+    ].includes(normalizedHost)
+        ? '/extractor/video/manifest.m3u8'
+        : '/extractor/video';
+    const path = `${playbackPath}?${query.toString()}`;
     return base ? `${base}${path}` : path;
 }
 
@@ -1705,7 +1717,7 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
     app.get('/proxy/hls/manifest.m3u8', proxyHandler);
     app.head('/proxy/hls/manifest.m3u8', proxyHandler);
 
-    app.get('/extractor/video', async (req, res) => {
+    const extractorVideoHandler = async (req, res) => {
         if (serverIsBlockingStreams()) {
             return res.status(503).json({ error: 'server paused' });
         }
@@ -1765,5 +1777,8 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
             console.error(`[extractor/video] error ${err && err.message}`);
             return res.status(500).json({ error: 'extractor error' });
         }
-    });
+    };
+
+    app.get('/extractor/video', extractorVideoHandler);
+    app.get('/extractor/video/manifest.m3u8', extractorVideoHandler);
 });
