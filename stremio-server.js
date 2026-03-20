@@ -760,6 +760,38 @@ function shouldResolveLatinoOnDemand(stream) {
     ].includes(String(stream.player).toLowerCase());
 }
 
+function shouldRetryLatinoPlaybackHost(host) {
+    return [
+        'goodstream',
+        'fastream',
+        'vimeos',
+        'streamwish',
+        'voe',
+    ].includes(String(host || '').toLowerCase());
+}
+
+async function probeResolvedLatinoStream(url, headers = {}) {
+    try {
+        const response = await axios({
+            method: isLikelyHlsUrl(url) ? 'GET' : 'HEAD',
+            url,
+            headers,
+            responseType: 'stream',
+            timeout: 4000,
+            maxRedirects: 5,
+            validateStatus: () => true,
+        });
+
+        if (response.data && typeof response.data.destroy === 'function') {
+            response.data.destroy();
+        }
+
+        return response.status;
+    } catch (_error) {
+        return 0;
+    }
+}
+
 function normalizeProxyTarget(rawUrl, headers = {}) {
     if (!rawUrl) {
         return rawUrl;
@@ -1500,13 +1532,30 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
             const headers = extractMediaflowHeaders(req.query);
             const resolveLatinoMediaflowTarget = await loadLatinoMediaflowResolver();
-            const stream = await resolveLatinoMediaflowTarget(rawTarget, headers, {
+            let stream = await resolveLatinoMediaflowTarget(rawTarget, headers, {
                 source: 'MediaFlow',
                 language: 'Latino',
                 title: host,
                 referer: headers.referer || headers.Referer || rawTarget,
                 player: host,
             });
+
+            if (stream && stream.url && shouldRetryLatinoPlaybackHost(host)) {
+                const firstStatus = await probeResolvedLatinoStream(stream.url, stream.headers || headers);
+                if (firstStatus === 403 || firstStatus === 404) {
+                    console.log(`[extractor/video] retrying fragile host ${host} after probe status ${firstStatus}`);
+                    const retried = await resolveLatinoMediaflowTarget(rawTarget, headers, {
+                        source: 'MediaFlow',
+                        language: 'Latino',
+                        title: host,
+                        referer: headers.referer || headers.Referer || rawTarget,
+                        player: host,
+                    }).catch(() => null);
+                    if (retried && retried.url) {
+                        stream = retried;
+                    }
+                }
+            }
 
             if (!stream || !stream.url) {
                 return res.status(404).json({ error: 'extractor could not resolve stream' });
