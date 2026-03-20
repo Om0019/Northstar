@@ -1,6 +1,7 @@
 import cheerio from 'cheerio-without-node-native';
+import axios from 'axios';
 import CryptoJS from 'crypto-js';
-import { fetchPage, fetchText } from './http.js';
+import { fetchJson, fetchPage, fetchText } from './http.js';
 import { extractPackedUrl, guessHeightFromPlaylist, parseQuality, qualityRank, uniqueBy, unpackPacker } from './utils.js';
 
 const SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === 'production';
@@ -22,6 +23,115 @@ function buildPlaybackHeaders(pageUrl, extra = {}) {
     ...(finalPageUrl ? { Referer: finalPageUrl } : {}),
     ...extra,
   };
+}
+
+function decodeBase64UrlToBytes(value) {
+  const input = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const normalized = input.padEnd(input.length + ((4 - input.length % 4) % 4), '=');
+
+  if (typeof Buffer !== 'undefined') {
+    return Uint8Array.from(Buffer.from(normalized, 'base64'));
+  }
+
+  const binary = globalThis.atob(normalized);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+function decodeBase64ToText(value) {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(String(value || ''), 'base64').toString('utf8');
+  }
+
+  return globalThis.atob(String(value || ''));
+}
+
+function extractEmbedCode(url) {
+  const parts = url.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
+  const markerIndex = parts.findIndex((part) => part === 'e' || part === 'embed');
+
+  if (markerIndex >= 0 && parts[markerIndex + 1]) {
+    return parts[markerIndex + 1];
+  }
+
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+async function decryptStreamwishPayload(payload) {
+  if (!payload?.iv || !payload?.payload || !Array.isArray(payload.key_parts) || payload.key_parts.length === 0) {
+    return null;
+  }
+
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    return null;
+  }
+
+  const keyParts = payload.key_parts.map((part) => decodeBase64UrlToBytes(part));
+  const key = new Uint8Array(keyParts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+
+  keyParts.forEach((part) => {
+    key.set(part, offset);
+    offset += part.length;
+  });
+
+  const iv = decodeBase64UrlToBytes(payload.iv);
+  const encrypted = decodeBase64UrlToBytes(payload.payload);
+  const importedKey = await subtle.importKey(
+    'raw',
+    key,
+    { name: 'AES-GCM' },
+    false,
+    ['decrypt']
+  );
+  const decrypted = await subtle.decrypt({ name: 'AES-GCM', iv }, importedKey, encrypted);
+
+  return JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)));
+}
+
+function rotate13(value) {
+  return String(value || '').replace(/[A-Za-z]/g, (char) => {
+    const base = char <= 'Z' ? 65 : 97;
+    return String.fromCharCode(((char.charCodeAt(0) - base + 13) % 26) + base);
+  });
+}
+
+function decodeVoeConfigToken(token) {
+  const normalized = rotate13(token)
+    .replace(/(@\$|\^\^|~@|%\?|\*~|!!|#&)/g, '_')
+    .replace(/_/g, '');
+  const decoded = decodeBase64ToText(normalized);
+  const shifted = Array.from(decoded, (char) => String.fromCharCode(char.charCodeAt(0) - 3)).join('');
+  const reversed = shifted.split('').reverse().join('');
+
+  return JSON.parse(decodeBase64ToText(reversed));
+}
+
+function extractVoeConfig(html) {
+  const matches = html.matchAll(/<script[^>]+type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi);
+
+  for (const match of matches) {
+    try {
+      const payload = JSON.parse(match[1]);
+      if (Array.isArray(payload) && typeof payload[0] === 'string') {
+        return decodeVoeConfigToken(payload[0]);
+      }
+    } catch (_error) {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractVoeRedirect(html) {
+  const match =
+    html.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/i) ||
+    html.match(/window\.location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i) ||
+    html.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i) ||
+    html.match(/location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i);
+
+  return match?.[1] || null;
 }
 
 function buildStream(result, extracted) {
@@ -70,7 +180,8 @@ export async function resolveLatinoStreams(results) {
     return a.name.localeCompare(b.name);
   });
 
-  return unique.map(({ qualityRank: _qualityRank, ...stream }) => stream);
+  const validated = await validateCuevanaStreams(unique);
+  return validated.map(({ qualityRank: _qualityRank, ...stream }) => stream);
 }
 
 export async function resolveLatinoMediaflowTarget(targetUrl, headers = {}, options = {}) {
@@ -104,7 +215,21 @@ async function resolveOne(result) {
     }
 
     if (/dropload|dr0pstream/i.test(host)) {
-      return resolveDropload(result, url);
+      console.log(`[WebstreamerLatino] Dropload skipped: ${result.url}`);
+      return [];
+    }
+
+    if (/vudeo/i.test(host)) {
+      console.log(`[WebstreamerLatino] Vudeo skipped: ${result.url}`);
+      return [];
+    }
+
+    if (/streamwish|bysejikuar/i.test(host) || /streamwish/i.test(result.player || '')) {
+      return resolveStreamwish(result, url);
+    }
+
+    if (/voe|dianaavoidthey/i.test(host) || /voe/i.test(result.player || '')) {
+      return resolveVoe(result, url);
     }
 
     if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
@@ -136,7 +261,8 @@ async function resolveOne(result) {
     }
 
     if (/waaw|vidora/i.test(host)) {
-      return resolveVidora(result, url);
+      console.log(`[WebstreamerLatino] Vidora skipped: ${result.url}`);
+      return [];
     }
 
     if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
@@ -167,6 +293,9 @@ function inferPlayerFromUrl(url) {
 
   if (value.includes('supervideo')) return 'SuperVideo';
   if (value.includes('dropload') || value.includes('dr0pstream')) return 'Dropload';
+  if (value.includes('vudeo')) return 'Vudeo';
+  if (value.includes('streamwish') || value.includes('bysejikuar')) return 'Streamwish';
+  if (value.includes('voe')) return 'VOE';
   if (value.includes('mixdrop') || value.includes('mixdrp') || value.includes('mixdroop') || value.includes('m1xdrop')) return 'Mixdrop';
   if (value.includes('filelions') || value.includes('vidhide')) return 'FileLions';
   if (value.includes('emturbovid') || value.includes('turbovidhls') || value.includes('turboviplay')) return 'Emturbovid';
@@ -190,6 +319,8 @@ function playerRank(player) {
   switch (player) {
     case 'FileLions':
       return 90;
+    case 'Streamwish':
+      return 88;
     case 'Emturbovid':
       return 85;
     case 'DoodStream':
@@ -210,10 +341,66 @@ function playerRank(player) {
       return 30;
     case 'Streamtape':
       return 20;
+    case 'VOE':
+      return 15;
+    case 'Vudeo':
+      return 5;
     case 'VidSrc':
       return 10;
     default:
       return 0;
+  }
+}
+
+async function validateCuevanaStreams(streams) {
+  const validated = await Promise.all(streams.map(async (stream) => {
+    if (stream.source !== 'Cuevana') {
+      return stream;
+    }
+
+    const ok = await probePlaybackUrl(stream.url, stream.headers);
+    if (!ok) {
+      console.log(`[WebstreamerLatino] Cuevana playback probe failed: ${stream.player} -> ${stream.url}`);
+      return null;
+    }
+
+    return stream;
+  }));
+
+  return validated.filter(Boolean);
+}
+
+async function probePlaybackUrl(url, headers = {}) {
+  try {
+    const response = await axios({
+      url,
+      method: 'GET',
+      headers: {
+        Range: 'bytes=0-0',
+        ...(headers || {}),
+      },
+      responseType: 'arraybuffer',
+      maxRedirects: 5,
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+
+    if (![200, 206].includes(response.status)) {
+      return false;
+    }
+
+    const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+    if (contentType.includes('text/html')) {
+      return false;
+    }
+
+    if (contentType.includes('mpegurl') || contentType.includes('video/') || contentType.includes('octet-stream')) {
+      return true;
+    }
+
+    return /\.(m3u8|mp4)(\?|$)/i.test(url) || /\/(master|playlist)\.(m3u8|txt)(\?|$)/i.test(url);
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -348,6 +535,111 @@ async function resolveMixdrop(result, url) {
     quality: 'Auto',
     headers: streamHeaders,
     player: 'Mixdrop',
+  })];
+}
+
+async function resolveStreamwish(result, url) {
+  const embedUrl = new URL(url.href.replace('/f/', '/e/'));
+  const code = extractEmbedCode(embedUrl);
+  if (!code) {
+    console.log(`[WebstreamerLatino] Streamwish miss: ${url.href}`);
+    return [];
+  }
+
+  const requestHeaders = {
+    ...(result.headers || {}),
+    ...buildPlaybackHeaders(embedUrl.href),
+    Accept: 'application/json, text/plain, */*',
+  };
+  const detailsUrl = new URL(`/api/videos/${encodeURIComponent(code)}/embed/details`, embedUrl.origin);
+  const playbackUrl = new URL(`/api/videos/${encodeURIComponent(code)}/embed/playback`, embedUrl.origin);
+
+  const details = await fetchJson(detailsUrl.href, { headers: requestHeaders }).catch(() => null);
+  const playback = await fetchJson(playbackUrl.href, { headers: requestHeaders }).catch(() => null);
+  const media = await decryptStreamwishPayload(playback?.playback || playback).catch(() => null);
+  const sources = Array.isArray(media?.sources) ? media.sources : [];
+
+  if (sources.length === 0) {
+    console.log(`[WebstreamerLatino] Streamwish parse miss: ${url.href}`);
+    return [];
+  }
+
+  const bestSource = [...sources]
+    .filter((source) => source?.url)
+    .sort((left, right) => {
+      const leftHeight = parseInt(left.height || parseQuality(left.label).replace(/\D+/g, ''), 10) || 0;
+      const rightHeight = parseInt(right.height || parseQuality(right.label).replace(/\D+/g, ''), 10) || 0;
+      const leftBitrate = parseInt(left.bitrate_kbps, 10) || 0;
+      const rightBitrate = parseInt(right.bitrate_kbps, 10) || 0;
+
+      if (rightHeight !== leftHeight) {
+        return rightHeight - leftHeight;
+      }
+
+      return rightBitrate - leftBitrate;
+    })[0];
+
+  if (!bestSource?.url) {
+    console.log(`[WebstreamerLatino] Streamwish parse miss: ${url.href}`);
+    return [];
+  }
+
+  const streamHeaders = buildPlaybackHeaders(embedUrl.href);
+  const quality = bestSource.height
+    ? `${bestSource.height}p`
+    : parseQuality(bestSource.label || bestSource.url);
+
+  return [buildStream(result, {
+    title: details?.title || result.title,
+    url: absoluteUrl(bestSource.url, embedUrl.origin),
+    quality,
+    headers: streamHeaders,
+    player: 'Streamwish',
+  })];
+}
+
+async function resolveVoe(result, url) {
+  const headers = {
+    ...(result.headers || {}),
+    Referer: result.referer || url.href,
+  };
+  let page = await fetchPage(url.href, { headers }).catch(() => null);
+  let html = page?.text || null;
+
+  if (!html) {
+    console.log(`[WebstreamerLatino] VOE miss: ${url.href}`);
+    return [];
+  }
+
+  let config = extractVoeConfig(html);
+  if (!config) {
+    const redirectUrl = extractVoeRedirect(html);
+    if (redirectUrl) {
+      page = await fetchPage(absoluteUrl(redirectUrl, url.origin), {
+        headers: buildPlaybackHeaders(absoluteUrl(redirectUrl, url.origin)),
+      }).catch(() => null);
+      html = page?.text || null;
+      config = html ? extractVoeConfig(html) : null;
+    }
+  }
+
+  const finalPageUrl = page.url || url.href;
+  const streamHeaders = buildPlaybackHeaders(finalPageUrl);
+  const playlistUrl = config?.source || null;
+  const directUrl = config?.direct_access_allowed !== false ? config?.direct_access_url : null;
+  const streamUrl = playlistUrl || directUrl;
+
+  if (!streamUrl) {
+    console.log(`[WebstreamerLatino] VOE parse miss: ${url.href}`);
+    return [];
+  }
+
+  return [buildStream(result, {
+    title: config?.title || result.title,
+    url: absoluteUrl(streamUrl, finalPageUrl),
+    quality: 'Auto',
+    headers: streamHeaders,
+    player: 'VOE',
   })];
 }
 

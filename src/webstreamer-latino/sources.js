@@ -18,9 +18,31 @@ function buildTitle(tmdb, season, episode) {
   return tmdb.year ? `${tmdb.title} (${tmdb.year})` : tmdb.title;
 }
 
+function buildSearchTerms(...values) {
+  const terms = new Set();
+
+  for (const value of values) {
+    const term = typeof value === 'string' ? value.trim() : '';
+    if (!term) {
+      continue;
+    }
+
+    terms.add(term);
+
+    const stripped = term.replace(/^(the|a|an)\s+/i, '').trim();
+    if (stripped && stripped !== term) {
+      terms.add(stripped);
+    }
+  }
+
+  return [...terms];
+}
+
 function scoreSearchCandidate(targetTitle, rawTitle, expectedYear, matchedYear) {
   const targetNorm = normalizeTitle(targetTitle);
   const rawNorm = normalizeTitle(rawTitle);
+  const expectedYearNumber = Number.parseInt(expectedYear, 10);
+  const matchedYearNumber = Number.parseInt(matchedYear, 10);
   let score = 0;
 
   if (!targetNorm || !rawNorm) {
@@ -33,13 +55,13 @@ function scoreSearchCandidate(targetTitle, rawTitle, expectedYear, matchedYear) 
     score += 5;
   }
 
-  if (expectedYear && matchedYear) {
-    if (matchedYear === expectedYear) {
+  if (Number.isFinite(expectedYearNumber) && Number.isFinite(matchedYearNumber)) {
+    if (matchedYearNumber === expectedYearNumber) {
       score += 4;
     } else {
       score -= 3;
     }
-  } else if (!expectedYear && matchedYear) {
+  } else if (!Number.isFinite(expectedYearNumber) && Number.isFinite(matchedYearNumber)) {
     score += 1;
   }
 
@@ -76,8 +98,14 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
     prewarmSource(SOURCE_BASES.verpeliculasultra),
   ]);
 
+  const cuevanaResults = disabled.has('cuevana')
+    ? []
+    : await withTimeout('cuevana', searchCuevana(tmdb, season, episode)).catch((error) => {
+      console.error('[WebstreamerLatino] Source error:', error ? error.message : error);
+      return [];
+    });
+
   const tasks = [
-    !disabled.has('cuevana') && withTimeout('cuevana', searchCuevana(tmdb, season, episode)),
     !disabled.has('cinehdplus') && withTimeout('cinehdplus', searchCineHdPlus(tmdb, mediaType, season, episode)),
     !disabled.has('cinecalidad') && withTimeout('cinecalidad', searchCineCalidad(tmdb, mediaType, season, episode)),
     !disabled.has('homecine') && withTimeout('homecine', searchHomeCine(tmdb, season, episode)),
@@ -95,7 +123,7 @@ export async function getLatinoSourceResults(tmdb, mediaType, season, episode) {
 
     console.error('[WebstreamerLatino] Source error:', result.reason ? result.reason.message : result.reason);
     return [];
-  });
+  }).concat(cuevanaResults);
 }
 
 async function prewarmSource(baseUrl) {
@@ -108,7 +136,7 @@ async function prewarmSource(baseUrl) {
 }
 
 async function searchCuevana(tmdb, season, episode) {
-  const searchTerms = [...new Set([tmdb.originalTitle, tmdb.title].filter(Boolean))];
+  const searchTerms = buildSearchTerms(tmdb.originalTitle, tmdb.title);
   let pagePath = null;
 
   for (const searchTerm of searchTerms) {
@@ -117,31 +145,24 @@ async function searchCuevana(tmdb, season, episode) {
       headers: { Referer: SOURCE_BASES.cuevana },
     });
     const $ = cheerio.load(html);
-    const targetNorm = normalizeTitle(searchTerm);
+    const resultCards = $('.MovieList.Rows > li .TPost');
+
+    if (!resultCards.length) {
+      continue;
+    }
 
     let bestPath = null;
     let bestScore = -1;
 
-    $('.TPost .Title').each((_, el) => {
-      const title = $(el).text().trim();
-      const href = $(el).closest('a').attr('href');
+    resultCards.each((_, card) => {
+      const title = $(card).find('.Title').first().text().trim();
+      const href = $(card).find('a[href]').first().attr('href');
       if (!href) {
         return;
       }
 
-      let score = 0;
-      const norm = normalizeTitle(title);
-      if (norm === targetNorm) {
-        score += 10;
-      }
-      if (norm.includes(targetNorm) || targetNorm.includes(norm)) {
-        score += 5;
-      }
-
-      const year = $(el).closest('.TPost').find('.Year').first().text().trim();
-      if (tmdb.year && year === tmdb.year) {
-        score += 3;
-      }
+      const year = $(card).find('.Year, .Date').first().text().trim();
+      const score = scoreSearchCandidate(searchTerm, title, tmdb.year, year);
 
       if (score > bestScore) {
         bestScore = score;
@@ -149,7 +170,7 @@ async function searchCuevana(tmdb, season, episode) {
       }
     });
 
-    if (bestPath) {
+    if (bestPath && bestScore >= 5) {
       pagePath = bestPath;
       break;
     }

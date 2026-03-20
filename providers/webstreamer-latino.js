@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-20T03:14:13.014Z
+ * Generated: 2026-03-20T04:36:28.571Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -354,9 +354,26 @@ function buildTitle(tmdb, season, episode) {
   }
   return tmdb.year ? `${tmdb.title} (${tmdb.year})` : tmdb.title;
 }
+function buildSearchTerms(...values) {
+  const terms = /* @__PURE__ */ new Set();
+  for (const value of values) {
+    const term = typeof value === "string" ? value.trim() : "";
+    if (!term) {
+      continue;
+    }
+    terms.add(term);
+    const stripped = term.replace(/^(the|a|an)\s+/i, "").trim();
+    if (stripped && stripped !== term) {
+      terms.add(stripped);
+    }
+  }
+  return [...terms];
+}
 function scoreSearchCandidate(targetTitle, rawTitle, expectedYear, matchedYear) {
   const targetNorm = normalizeTitle(targetTitle);
   const rawNorm = normalizeTitle(rawTitle);
+  const expectedYearNumber = Number.parseInt(expectedYear, 10);
+  const matchedYearNumber = Number.parseInt(matchedYear, 10);
   let score = 0;
   if (!targetNorm || !rawNorm) {
     return score;
@@ -366,13 +383,13 @@ function scoreSearchCandidate(targetTitle, rawTitle, expectedYear, matchedYear) 
   } else if (rawNorm.includes(targetNorm) || targetNorm.includes(rawNorm)) {
     score += 5;
   }
-  if (expectedYear && matchedYear) {
-    if (matchedYear === expectedYear) {
+  if (Number.isFinite(expectedYearNumber) && Number.isFinite(matchedYearNumber)) {
+    if (matchedYearNumber === expectedYearNumber) {
       score += 4;
     } else {
       score -= 3;
     }
-  } else if (!expectedYear && matchedYear) {
+  } else if (!Number.isFinite(expectedYearNumber) && Number.isFinite(matchedYearNumber)) {
     score += 1;
   }
   return score;
@@ -402,8 +419,11 @@ function getLatinoSourceResults(tmdb, mediaType, season, episode) {
       prewarmSource(SOURCE_BASES.tioplus),
       prewarmSource(SOURCE_BASES.verpeliculasultra)
     ]);
+    const cuevanaResults = disabled.has("cuevana") ? [] : yield withTimeout("cuevana", searchCuevana(tmdb, season, episode)).catch((error) => {
+      console.error("[WebstreamerLatino] Source error:", error ? error.message : error);
+      return [];
+    });
     const tasks = [
-      !disabled.has("cuevana") && withTimeout("cuevana", searchCuevana(tmdb, season, episode)),
       !disabled.has("cinehdplus") && withTimeout("cinehdplus", searchCineHdPlus(tmdb, mediaType, season, episode)),
       !disabled.has("cinecalidad") && withTimeout("cinecalidad", searchCineCalidad(tmdb, mediaType, season, episode)),
       !disabled.has("homecine") && withTimeout("homecine", searchHomeCine(tmdb, season, episode)),
@@ -418,7 +438,7 @@ function getLatinoSourceResults(tmdb, mediaType, season, episode) {
       }
       console.error("[WebstreamerLatino] Source error:", result.reason ? result.reason.message : result.reason);
       return [];
-    });
+    }).concat(cuevanaResults);
   });
 }
 function prewarmSource(baseUrl) {
@@ -433,7 +453,7 @@ function prewarmSource(baseUrl) {
 }
 function searchCuevana(tmdb, season, episode) {
   return __async(this, null, function* () {
-    const searchTerms = [...new Set([tmdb.originalTitle, tmdb.title].filter(Boolean))];
+    const searchTerms = buildSearchTerms(tmdb.originalTitle, tmdb.title);
     let pagePath = null;
     for (const searchTerm of searchTerms) {
       const searchUrl = `${SOURCE_BASES.cuevana}/search/${encodeURIComponent(searchTerm)}/`;
@@ -441,33 +461,26 @@ function searchCuevana(tmdb, season, episode) {
         headers: { Referer: SOURCE_BASES.cuevana }
       });
       const $ = import_cheerio_without_node_native.default.load(html);
-      const targetNorm = normalizeTitle(searchTerm);
+      const resultCards = $(".MovieList.Rows > li .TPost");
+      if (!resultCards.length) {
+        continue;
+      }
       let bestPath = null;
       let bestScore = -1;
-      $(".TPost .Title").each((_, el) => {
-        const title = $(el).text().trim();
-        const href = $(el).closest("a").attr("href");
+      resultCards.each((_, card) => {
+        const title = $(card).find(".Title").first().text().trim();
+        const href = $(card).find("a[href]").first().attr("href");
         if (!href) {
           return;
         }
-        let score = 0;
-        const norm = normalizeTitle(title);
-        if (norm === targetNorm) {
-          score += 10;
-        }
-        if (norm.includes(targetNorm) || targetNorm.includes(norm)) {
-          score += 5;
-        }
-        const year = $(el).closest(".TPost").find(".Year").first().text().trim();
-        if (tmdb.year && year === tmdb.year) {
-          score += 3;
-        }
+        const year = $(card).find(".Year, .Date").first().text().trim();
+        const score = scoreSearchCandidate(searchTerm, title, tmdb.year, year);
         if (score > bestScore) {
           bestScore = score;
           bestPath = href;
         }
       });
-      if (bestPath) {
+      if (bestPath && bestScore >= 5) {
         pagePath = bestPath;
         break;
       }
@@ -1134,6 +1147,7 @@ function resolveTioPlusPlayer(result) {
 
 // src/webstreamer-latino/extractors.js
 var import_cheerio_without_node_native2 = __toESM(require("cheerio-without-node-native"));
+var import_axios2 = __toESM(require("axios"));
 var import_crypto_js = __toESM(require("crypto-js"));
 var SHOULD_VALIDATE_MEDIA = process.env.NODE_ENV === "production";
 function absoluteUrl(rawUrl, origin) {
@@ -1147,6 +1161,90 @@ function buildPlaybackHeaders(pageUrl, extra = {}) {
   } catch (_error) {
   }
   return __spreadValues(__spreadValues(__spreadValues({}, origin ? { Origin: origin } : {}), finalPageUrl ? { Referer: finalPageUrl } : {}), extra);
+}
+function decodeBase64UrlToBytes(value) {
+  const input = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const normalized = input.padEnd(input.length + (4 - input.length % 4) % 4, "=");
+  if (typeof Buffer !== "undefined") {
+    return Uint8Array.from(Buffer.from(normalized, "base64"));
+  }
+  const binary = globalThis.atob(normalized);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+function decodeBase64ToText(value) {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(String(value || ""), "base64").toString("utf8");
+  }
+  return globalThis.atob(String(value || ""));
+}
+function extractEmbedCode(url) {
+  const parts = url.pathname.replace(/\/+$/, "").split("/").filter(Boolean);
+  const markerIndex = parts.findIndex((part) => part === "e" || part === "embed");
+  if (markerIndex >= 0 && parts[markerIndex + 1]) {
+    return parts[markerIndex + 1];
+  }
+  return parts.length ? parts[parts.length - 1] : "";
+}
+function decryptStreamwishPayload(payload) {
+  return __async(this, null, function* () {
+    var _a;
+    if (!(payload == null ? void 0 : payload.iv) || !(payload == null ? void 0 : payload.payload) || !Array.isArray(payload.key_parts) || payload.key_parts.length === 0) {
+      return null;
+    }
+    const subtle = (_a = globalThis.crypto) == null ? void 0 : _a.subtle;
+    if (!subtle) {
+      return null;
+    }
+    const keyParts = payload.key_parts.map((part) => decodeBase64UrlToBytes(part));
+    const key = new Uint8Array(keyParts.reduce((size, part) => size + part.length, 0));
+    let offset = 0;
+    keyParts.forEach((part) => {
+      key.set(part, offset);
+      offset += part.length;
+    });
+    const iv = decodeBase64UrlToBytes(payload.iv);
+    const encrypted = decodeBase64UrlToBytes(payload.payload);
+    const importedKey = yield subtle.importKey(
+      "raw",
+      key,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+    const decrypted = yield subtle.decrypt({ name: "AES-GCM", iv }, importedKey, encrypted);
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)));
+  });
+}
+function rotate13(value) {
+  return String(value || "").replace(/[A-Za-z]/g, (char) => {
+    const base = char <= "Z" ? 65 : 97;
+    return String.fromCharCode((char.charCodeAt(0) - base + 13) % 26 + base);
+  });
+}
+function decodeVoeConfigToken(token) {
+  const normalized = rotate13(token).replace(/(@\$|\^\^|~@|%\?|\*~|!!|#&)/g, "_").replace(/_/g, "");
+  const decoded = decodeBase64ToText(normalized);
+  const shifted = Array.from(decoded, (char) => String.fromCharCode(char.charCodeAt(0) - 3)).join("");
+  const reversed = shifted.split("").reverse().join("");
+  return JSON.parse(decodeBase64ToText(reversed));
+}
+function extractVoeConfig(html) {
+  const matches = html.matchAll(/<script[^>]+type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi);
+  for (const match of matches) {
+    try {
+      const payload = JSON.parse(match[1]);
+      if (Array.isArray(payload) && typeof payload[0] === "string") {
+        return decodeVoeConfigToken(payload[0]);
+      }
+    } catch (_error) {
+      continue;
+    }
+  }
+  return null;
+}
+function extractVoeRedirect(html) {
+  const match = html.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/i) || html.match(/window\.location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i) || html.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i) || html.match(/location\.replace\(\s*['"]([^'"]+)['"]\s*\)/i);
+  return (match == null ? void 0 : match[1]) || null;
 }
 function buildStream(result, extracted) {
   const quality = extracted.quality || parseQuality(extracted.title || extracted.url);
@@ -1188,7 +1286,8 @@ function resolveLatinoStreams(results) {
       }
       return a.name.localeCompare(b.name);
     });
-    return unique.map((_a) => {
+    const validated = yield validateCuevanaStreams(unique);
+    return validated.map((_a) => {
       var _b = _a, { qualityRank: _qualityRank } = _b, stream = __objRest(_b, ["qualityRank"]);
       return stream;
     });
@@ -1207,7 +1306,18 @@ function resolveOne(result) {
         return [];
       }
       if (/dropload|dr0pstream/i.test(host)) {
-        return resolveDropload(result, url);
+        console.log(`[WebstreamerLatino] Dropload skipped: ${result.url}`);
+        return [];
+      }
+      if (/vudeo/i.test(host)) {
+        console.log(`[WebstreamerLatino] Vudeo skipped: ${result.url}`);
+        return [];
+      }
+      if (/streamwish|bysejikuar/i.test(host) || /streamwish/i.test(result.player || "")) {
+        return resolveStreamwish(result, url);
+      }
+      if (/voe|dianaavoidthey/i.test(host) || /voe/i.test(result.player || "")) {
+        return resolveVoe(result, url);
       }
       if (/mixdrop|mixdrp|mixdroop|m1xdrop/i.test(host)) {
         return resolveMixdrop(result, url);
@@ -1231,7 +1341,8 @@ function resolveOne(result) {
         return resolveFastream(result, url);
       }
       if (/waaw|vidora/i.test(host)) {
-        return resolveVidora(result, url);
+        console.log(`[WebstreamerLatino] Vidora skipped: ${result.url}`);
+        return [];
       }
       if (/strp2p|4meplayer|upns\.pro|p2pplay/i.test(host)) {
         return resolveStrp2p(result, url);
@@ -1258,6 +1369,12 @@ function inferPlayerFromUrl(url) {
     return "SuperVideo";
   if (value.includes("dropload") || value.includes("dr0pstream"))
     return "Dropload";
+  if (value.includes("vudeo"))
+    return "Vudeo";
+  if (value.includes("streamwish") || value.includes("bysejikuar"))
+    return "Streamwish";
+  if (value.includes("voe"))
+    return "VOE";
   if (value.includes("mixdrop") || value.includes("mixdrp") || value.includes("mixdroop") || value.includes("m1xdrop"))
     return "Mixdrop";
   if (value.includes("filelions") || value.includes("vidhide"))
@@ -1290,6 +1407,8 @@ function playerRank(player) {
   switch (player) {
     case "FileLions":
       return 90;
+    case "Streamwish":
+      return 88;
     case "Emturbovid":
       return 85;
     case "DoodStream":
@@ -1310,11 +1429,62 @@ function playerRank(player) {
       return 30;
     case "Streamtape":
       return 20;
+    case "VOE":
+      return 15;
+    case "Vudeo":
+      return 5;
     case "VidSrc":
       return 10;
     default:
       return 0;
   }
+}
+function validateCuevanaStreams(streams) {
+  return __async(this, null, function* () {
+    const validated = yield Promise.all(streams.map((stream) => __async(this, null, function* () {
+      if (stream.source !== "Cuevana") {
+        return stream;
+      }
+      const ok = yield probePlaybackUrl(stream.url, stream.headers);
+      if (!ok) {
+        console.log(`[WebstreamerLatino] Cuevana playback probe failed: ${stream.player} -> ${stream.url}`);
+        return null;
+      }
+      return stream;
+    })));
+    return validated.filter(Boolean);
+  });
+}
+function probePlaybackUrl(_0) {
+  return __async(this, arguments, function* (url, headers = {}) {
+    var _a;
+    try {
+      const response = yield (0, import_axios2.default)({
+        url,
+        method: "GET",
+        headers: __spreadValues({
+          Range: "bytes=0-0"
+        }, headers || {}),
+        responseType: "arraybuffer",
+        maxRedirects: 5,
+        timeout: 8e3,
+        validateStatus: () => true
+      });
+      if (![200, 206].includes(response.status)) {
+        return false;
+      }
+      const contentType = String(((_a = response.headers) == null ? void 0 : _a["content-type"]) || "").toLowerCase();
+      if (contentType.includes("text/html")) {
+        return false;
+      }
+      if (contentType.includes("mpegurl") || contentType.includes("video/") || contentType.includes("octet-stream")) {
+        return true;
+      }
+      return /\.(m3u8|mp4)(\?|$)/i.test(url) || /\/(master|playlist)\.(m3u8|txt)(\?|$)/i.test(url);
+    } catch (_error) {
+      return false;
+    }
+  });
 }
 function extractCookieHeader(rawSetCookie) {
   if (!rawSetCookie) {
@@ -1428,6 +1598,92 @@ function resolveMixdrop(result, url) {
       quality: "Auto",
       headers: streamHeaders,
       player: "Mixdrop"
+    })];
+  });
+}
+function resolveStreamwish(result, url) {
+  return __async(this, null, function* () {
+    const embedUrl = new URL(url.href.replace("/f/", "/e/"));
+    const code = extractEmbedCode(embedUrl);
+    if (!code) {
+      console.log(`[WebstreamerLatino] Streamwish miss: ${url.href}`);
+      return [];
+    }
+    const requestHeaders = __spreadProps(__spreadValues(__spreadValues({}, result.headers || {}), buildPlaybackHeaders(embedUrl.href)), {
+      Accept: "application/json, text/plain, */*"
+    });
+    const detailsUrl = new URL(`/api/videos/${encodeURIComponent(code)}/embed/details`, embedUrl.origin);
+    const playbackUrl = new URL(`/api/videos/${encodeURIComponent(code)}/embed/playback`, embedUrl.origin);
+    const details = yield fetchJson(detailsUrl.href, { headers: requestHeaders }).catch(() => null);
+    const playback = yield fetchJson(playbackUrl.href, { headers: requestHeaders }).catch(() => null);
+    const media = yield decryptStreamwishPayload((playback == null ? void 0 : playback.playback) || playback).catch(() => null);
+    const sources = Array.isArray(media == null ? void 0 : media.sources) ? media.sources : [];
+    if (sources.length === 0) {
+      console.log(`[WebstreamerLatino] Streamwish parse miss: ${url.href}`);
+      return [];
+    }
+    const bestSource = [...sources].filter((source) => source == null ? void 0 : source.url).sort((left, right) => {
+      const leftHeight = parseInt(left.height || parseQuality(left.label).replace(/\D+/g, ""), 10) || 0;
+      const rightHeight = parseInt(right.height || parseQuality(right.label).replace(/\D+/g, ""), 10) || 0;
+      const leftBitrate = parseInt(left.bitrate_kbps, 10) || 0;
+      const rightBitrate = parseInt(right.bitrate_kbps, 10) || 0;
+      if (rightHeight !== leftHeight) {
+        return rightHeight - leftHeight;
+      }
+      return rightBitrate - leftBitrate;
+    })[0];
+    if (!(bestSource == null ? void 0 : bestSource.url)) {
+      console.log(`[WebstreamerLatino] Streamwish parse miss: ${url.href}`);
+      return [];
+    }
+    const streamHeaders = buildPlaybackHeaders(embedUrl.href);
+    const quality = bestSource.height ? `${bestSource.height}p` : parseQuality(bestSource.label || bestSource.url);
+    return [buildStream(result, {
+      title: (details == null ? void 0 : details.title) || result.title,
+      url: absoluteUrl(bestSource.url, embedUrl.origin),
+      quality,
+      headers: streamHeaders,
+      player: "Streamwish"
+    })];
+  });
+}
+function resolveVoe(result, url) {
+  return __async(this, null, function* () {
+    const headers = __spreadProps(__spreadValues({}, result.headers || {}), {
+      Referer: result.referer || url.href
+    });
+    let page = yield fetchPage(url.href, { headers }).catch(() => null);
+    let html = (page == null ? void 0 : page.text) || null;
+    if (!html) {
+      console.log(`[WebstreamerLatino] VOE miss: ${url.href}`);
+      return [];
+    }
+    let config = extractVoeConfig(html);
+    if (!config) {
+      const redirectUrl = extractVoeRedirect(html);
+      if (redirectUrl) {
+        page = yield fetchPage(absoluteUrl(redirectUrl, url.origin), {
+          headers: buildPlaybackHeaders(absoluteUrl(redirectUrl, url.origin))
+        }).catch(() => null);
+        html = (page == null ? void 0 : page.text) || null;
+        config = html ? extractVoeConfig(html) : null;
+      }
+    }
+    const finalPageUrl = page.url || url.href;
+    const streamHeaders = buildPlaybackHeaders(finalPageUrl);
+    const playlistUrl = (config == null ? void 0 : config.source) || null;
+    const directUrl = (config == null ? void 0 : config.direct_access_allowed) !== false ? config == null ? void 0 : config.direct_access_url : null;
+    const streamUrl = playlistUrl || directUrl;
+    if (!streamUrl) {
+      console.log(`[WebstreamerLatino] VOE parse miss: ${url.href}`);
+      return [];
+    }
+    return [buildStream(result, {
+      title: (config == null ? void 0 : config.title) || result.title,
+      url: absoluteUrl(streamUrl, finalPageUrl),
+      quality: "Auto",
+      headers: streamHeaders,
+      player: "VOE"
     })];
   });
 }
@@ -1625,38 +1881,6 @@ function resolveDoodStream(result, url) {
     })];
   });
 }
-function resolveDropload(result, url) {
-  return __async(this, null, function* () {
-    const normalized = url.href.replace("/d/", "/").replace("/e/", "/").replace("/embed-", "/");
-    const html = yield fetchText(normalized, { headers: result.headers }).catch(() => null);
-    if (!html) {
-      console.log(`[WebstreamerLatino] Dropload miss: ${url.href}`);
-      return [];
-    }
-    if (/File Not Found|Pending in queue|no longer available|expired or has been deleted/i.test(html)) {
-      console.log(`[WebstreamerLatino] Dropload miss: ${url.href}`);
-      return [];
-    }
-    const unpacked = unpackPacker(html);
-    const fileMatch = unpacked.match(/sources\s*:\s*\[\{\s*file\s*:\s*["']([^"']+)/i) || html.match(/sources\s*:\s*\[\{\s*file\s*:\s*["']([^"']+)/i) || unpacked.match(/file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i) || html.match(/file\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)/i);
-    if (!fileMatch) {
-      console.log(`[WebstreamerLatino] Dropload parse miss: ${url.href}`);
-      return [];
-    }
-    const hostMatch = html.match(/(https:\/\/.+?\/)player/);
-    const page = import_cheerio_without_node_native2.default.load(html);
-    const title = page(".videoplayer h1").text().trim() || result.title;
-    const playlistHeaders = hostMatch ? { Referer: hostMatch[1] } : result.headers || {};
-    const height = yield guessHeightFromPlaylist(fileMatch[1], playlistHeaders);
-    return [buildStream(result, {
-      title,
-      url: fileMatch[1],
-      quality: height ? `${height}p` : "Auto",
-      headers: playlistHeaders,
-      player: "Dropload"
-    })];
-  });
-}
 function resolveStreamtape(result, url) {
   return __async(this, null, function* () {
     const candidates = uniqueBy([
@@ -1728,47 +1952,6 @@ function resolveFastream(result, url) {
     }
     console.log(`[WebstreamerLatino] Fastream miss: ${url.href}`);
     return [];
-  });
-}
-function resolveVidora(result, url) {
-  return __async(this, null, function* () {
-    const candidates = uniqueBy([
-      url.href.replace("/embed/", "/").replace("/f/", "/e/"),
-      url.href.replace("/embed/", "/"),
-      url.href
-    ], (value) => value);
-    let html = null;
-    let finalUrl = null;
-    for (const candidate of candidates) {
-      const page2 = yield fetchText(candidate, { headers: result.headers }).catch(() => null);
-      if (!page2) {
-        continue;
-      }
-      html = page2;
-      finalUrl = candidate;
-      break;
-    }
-    if (!html || !finalUrl) {
-      console.log(`[WebstreamerLatino] Vidora miss: ${url.href}`);
-      return [];
-    }
-    const unpacked = unpackPacker(html);
-    const fileMatch = unpacked.match(/file:\s*"(.*?)"/) || unpacked.match(/file:\s*'(.*?)'/) || html.match(/src:\s*['"](https?:\/\/[^'"]+\.m3u8[^'"]*)/i);
-    if (!fileMatch) {
-      console.log(`[WebstreamerLatino] Vidora miss: ${url.href}`);
-      return [];
-    }
-    const page = import_cheerio_without_node_native2.default.load(html);
-    const title = page("title").text().trim().replace(/^Watch /, "") || result.title;
-    const streamHeaders = buildPlaybackHeaders(finalUrl);
-    const height = yield guessHeightFromPlaylist(fileMatch[1], streamHeaders);
-    return [buildStream(result, {
-      title,
-      url: fileMatch[1],
-      quality: height ? `${height}p` : "Auto",
-      headers: streamHeaders,
-      player: "Vidora"
-    })];
   });
 }
 function resolveStreamEmbed(result, url) {
