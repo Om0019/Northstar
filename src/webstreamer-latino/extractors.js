@@ -182,7 +182,7 @@ export async function resolveLatinoStreams(results) {
     return a.name.localeCompare(b.name);
   });
 
-  const validated = await validateCuevanaStreams(unique);
+  const validated = await validatePlayableStreams(unique);
   return validated.map(({ qualityRank: _qualityRank, ...stream }) => stream);
 }
 
@@ -366,15 +366,38 @@ function playerRank(player) {
   }
 }
 
-async function validateCuevanaStreams(streams) {
+function shouldProbePlayableStream(stream) {
+  const player = String(stream?.player || '').toLowerCase();
+
+  if (!player) {
+    return true;
+  }
+
+  if (player === 'filelions' || player === 'emturbovid') {
+    return false;
+  }
+
+  return [
+    'goodstream',
+    'fastream',
+    'vimeos',
+    'streamwish',
+    'voe',
+    'doodstream',
+    'mixdrop',
+    'streamtape',
+  ].includes(player);
+}
+
+async function validatePlayableStreams(streams) {
   const validated = await Promise.all(streams.map(async (stream) => {
-    if (stream.source !== 'Cuevana') {
+    if (!shouldProbePlayableStream(stream)) {
       return stream;
     }
 
     const ok = await probePlaybackUrl(stream.url, stream.headers);
     if (!ok) {
-      console.log(`[WebstreamerLatino] Cuevana playback probe failed: ${stream.player} -> ${stream.url}`);
+      console.log(`[WebstreamerLatino] playback probe failed: ${stream.player} -> ${stream.url}`);
       return null;
     }
 
@@ -395,7 +418,7 @@ async function probePlaybackUrl(url, headers = {}) {
       },
       responseType: 'arraybuffer',
       maxRedirects: 5,
-      timeout: 8000,
+      timeout: 1200,
       validateStatus: () => true,
     });
 

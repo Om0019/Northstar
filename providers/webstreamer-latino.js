@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-20T05:58:27.019Z
+ * Generated: 2026-03-20T06:42:19.404Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -1165,7 +1165,7 @@ function resolveLatinoStreams(results) {
       }
       return a.name.localeCompare(b.name);
     });
-    const validated = yield validateCuevanaStreams(unique);
+    const validated = yield validatePlayableStreams(unique);
     return validated.map((_a) => {
       var _b = _a, { qualityRank: _qualityRank } = _b, stream = __objRest(_b, ["qualityRank"]);
       return stream;
@@ -1329,15 +1329,34 @@ function playerRank(player) {
       return 0;
   }
 }
-function validateCuevanaStreams(streams) {
+function shouldProbePlayableStream(stream) {
+  const player = String((stream == null ? void 0 : stream.player) || "").toLowerCase();
+  if (!player) {
+    return true;
+  }
+  if (player === "filelions" || player === "emturbovid") {
+    return false;
+  }
+  return [
+    "goodstream",
+    "fastream",
+    "vimeos",
+    "streamwish",
+    "voe",
+    "doodstream",
+    "mixdrop",
+    "streamtape"
+  ].includes(player);
+}
+function validatePlayableStreams(streams) {
   return __async(this, null, function* () {
     const validated = yield Promise.all(streams.map((stream) => __async(this, null, function* () {
-      if (stream.source !== "Cuevana") {
+      if (!shouldProbePlayableStream(stream)) {
         return stream;
       }
       const ok = yield probePlaybackUrl(stream.url, stream.headers);
       if (!ok) {
-        console.log(`[WebstreamerLatino] Cuevana playback probe failed: ${stream.player} -> ${stream.url}`);
+        console.log(`[WebstreamerLatino] playback probe failed: ${stream.player} -> ${stream.url}`);
         return null;
       }
       return stream;
@@ -1357,7 +1376,7 @@ function probePlaybackUrl(_0) {
         }, headers || {}),
         responseType: "arraybuffer",
         maxRedirects: 5,
-        timeout: 8e3,
+        timeout: 1200,
         validateStatus: () => true
       });
       if (![200, 206].includes(response.status)) {

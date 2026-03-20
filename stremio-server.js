@@ -919,6 +919,10 @@ async function pruneDeadHlsVariants(playlistText, baseUrl) {
     return kept.join('\n');
 }
 
+function shouldBypassLatinoNestedProxy(baseUrl) {
+    return /(turboviplay|turbovidhls|emturbovid|goodstream|vimeos|fastream|filelions|vidhide)/i.test(String(baseUrl || ''));
+}
+
 async function loadLatinoMediaflowResolver() {
     if (!latinoMediaflowModulePromise) {
         const modulePath = path.join(__dirname, 'src', 'webstreamer-latino', 'extractors.js');
@@ -1460,6 +1464,7 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                     const sanitizedData = data.includes('#EXT-X-STREAM-INF')
                         ? await pruneDeadHlsVariants(data, baseUrl)
                         : data;
+                    const bypassNestedProxy = shouldBypassLatinoNestedProxy(baseUrl);
                     
                     const toAbsoluteUrl = (value) => {
                         if (value.startsWith('http://') || value.startsWith('https://')) {
@@ -1474,6 +1479,9 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
 
                     const toProxyUrl = (value) => {
                         const urlToProxy = toAbsoluteUrl(value);
+                        if (bypassNestedProxy) {
+                            return urlToProxy;
+                        }
                         if (urlToProxy.includes('/proxy?')) return value;
 
                         const eurl = encodeURIComponent(urlToProxy);
