@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-20T02:57:06.660Z
+ * Generated: 2026-03-20T03:14:13.014Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -1413,11 +1413,7 @@ function resolveMixdrop(result, url) {
     const page = import_cheerio_without_node_native2.default.load((filePage == null ? void 0 : filePage.text) || html);
     const title = page(".title b").text().trim() || result.title;
     const finalEmbedUrl = new URL(finalPageUrl);
-    const finalFileUrl = new URL(finalEmbedUrl.href.replace("/e/", "/f/"));
-    const streamHeaders = {
-      Referer: finalFileUrl.href,
-      Origin: finalEmbedUrl.origin
-    };
+    const streamHeaders = buildPlaybackHeaders(finalEmbedUrl.href);
     if (cookieHeader) {
       streamHeaders.Cookie = cookieHeader;
     }

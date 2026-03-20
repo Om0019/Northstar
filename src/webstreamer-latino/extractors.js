@@ -330,11 +330,7 @@ async function resolveMixdrop(result, url) {
   const page = cheerio.load(filePage?.text || html);
   const title = page('.title b').text().trim() || result.title;
   const finalEmbedUrl = new URL(finalPageUrl);
-  const finalFileUrl = new URL(finalEmbedUrl.href.replace('/e/', '/f/'));
-  const streamHeaders = {
-    Referer: finalFileUrl.href,
-    Origin: finalEmbedUrl.origin,
-  };
+  const streamHeaders = buildPlaybackHeaders(finalEmbedUrl.href);
 
   if (cookieHeader) {
     streamHeaders.Cookie = cookieHeader;
