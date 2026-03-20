@@ -1748,7 +1748,8 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
             const sid = req.query.sid ? String(req.query.sid) : '';
             const proxyUrl = mediaflowProxyWrap(req, stream.url, stream.headers || headers, sid ? { sid } : {});
 
-            if (String(req.query.redirect_stream || '').toLowerCase() === 'true') {
+            const redirectMode = String(req.query.redirect_stream || '').toLowerCase();
+            if (redirectMode !== 'false') {
                 return res.redirect(proxyUrl);
             }
 
