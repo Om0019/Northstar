@@ -68,6 +68,47 @@ function collectAudioLanguages(item, source) {
   ];
   return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
+function normalizeAudioLanguageLabel(value) {
+  const text = String(value || "").trim();
+  if (!text)
+    return "";
+  if (/^(auto|full hd|mid hd|low hd)$/i.test(text))
+    return "";
+  return text;
+}
+function extractAudioLanguagesFromManifest(url, headers = {}) {
+  return makeRequest(url, {
+    headers
+  }).then((response) => response.text()).then((manifestText) => {
+    const languages = [];
+    const seen = /* @__PURE__ */ new Set();
+    const mediaRegex = /^#EXT-X-MEDIA:TYPE=AUDIO,([^\n]+)$/gim;
+    let match;
+    while ((match = mediaRegex.exec(manifestText)) !== null) {
+      const attrs = match[1];
+      const languageMatch = attrs.match(/LANGUAGE="([^"]+)"/i);
+      const nameMatch = attrs.match(/NAME="([^"]+)"/i);
+      const label = normalizeAudioLanguageLabel(nameMatch ? nameMatch[1] : languageMatch ? languageMatch[1] : "");
+      if (!label)
+        continue;
+      const key = label.toLowerCase();
+      if (seen.has(key))
+        continue;
+      seen.add(key);
+      languages.push(label);
+    }
+    return languages;
+  }).catch((_error) => []);
+}
+function summarizeAudioLanguages(audioLanguages) {
+  const values = Array.isArray(audioLanguages) ? audioLanguages.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  if (values.length === 0)
+    return "";
+  const preferred = values.find((value) => /^spanish$/i.test(value));
+  if (preferred)
+    return "🇲🇽";
+  return values[0];
+}
 function scoreSearchResult(resultTitle, targetTitle, expectedYear) {
   const normalizedResult = normalizeTitle(resultTitle);
   const normalizedTarget = normalizeTitle(targetTitle);
@@ -657,9 +698,21 @@ function getStreams(tmdbId, mediaType = "movie", seasonNum = null, episodeNum = 
               if (adaptiveStream) {
                 adaptiveStream.quality = "Auto";
                 adaptiveStream.title = adaptiveStream.title.replace(/\s+(Auto|1080p|720p|480p|360p)$/i, " Auto");
+                return extractAudioLanguagesFromManifest(adaptiveStream.url, adaptiveStream.headers).then((audioLanguages) => {
+                  if (audioLanguages.length > 0) {
+                    adaptiveStream.audioLanguages = audioLanguages;
+                    const languageLabel = summarizeAudioLanguages(audioLanguages);
+                    if (languageLabel) {
+                      adaptiveStream.name = `${languageLabel} ${adaptiveStream.name}`;
+                      adaptiveStream.title = `${languageLabel} ${adaptiveStream.title}`;
+                    }
+                  }
+                  console.log(`[NetMirror] Successfully processed ${streams.length} streams from ${platform}, returning adaptive stream`);
+                  return [adaptiveStream];
+                });
               }
               console.log(`[NetMirror] Successfully processed ${streams.length} streams from ${platform}, returning ${adaptiveStream ? "adaptive stream" : "no streams"}`);
-              return adaptiveStream ? [adaptiveStream] : [];
+              return [];
             });
           });
           }
