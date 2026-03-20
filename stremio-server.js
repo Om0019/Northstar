@@ -762,7 +762,6 @@ function shouldResolveLatinoOnDemand(stream) {
 
 function shouldRetryLatinoPlaybackHost(host) {
     return [
-        'goodstream',
         'fastream',
         'vimeos',
         'streamwish',
@@ -921,45 +920,6 @@ async function pruneDeadHlsVariants(playlistText, baseUrl) {
 
 function shouldBypassLatinoNestedProxy(baseUrl) {
     return /(turboviplay|turbovidhls|emturbovid|goodstream|vimeos|fastream|filelions|vidhide)/i.test(String(baseUrl || ''));
-}
-
-function stripImageOnlyHlsRenditions(playlistText, baseUrl) {
-    const shouldStrip = /(callistanise|filelions|vidhide)/i.test(String(baseUrl || ''));
-    if (!shouldStrip) {
-        return playlistText;
-    }
-
-    const lines = playlistText.split('\n');
-    const kept = [];
-
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i] || '';
-        const trimmed = line.trim();
-
-        if (!trimmed) {
-            kept.push(line);
-            continue;
-        }
-
-        if (trimmed.startsWith('#EXT-X-IMAGE-STREAM-INF')) {
-            continue;
-        }
-
-        if (
-            trimmed.startsWith('#EXT-X-MEDIA') &&
-            /TYPE=IMAGE/i.test(trimmed)
-        ) {
-            continue;
-        }
-
-        if (!trimmed.startsWith('#') && /tiktokcdn\.com/i.test(trimmed)) {
-            continue;
-        }
-
-        kept.push(line.replace(/URI="https?:\/\/[^"]*tiktokcdn\.com[^"]*"/gi, ''));
-    }
-
-    return kept.join('\n');
 }
 
 async function filterReachableHlsVariants(playlistText, baseUrl) {
@@ -1585,7 +1545,6 @@ startServer(builder.getInterface(), { port: PORT }).then(({ server, url }) => {
                     let sanitizedData = isMasterPlaylist
                         ? await pruneDeadHlsVariants(data, baseUrl)
                         : data;
-                    sanitizedData = stripImageOnlyHlsRenditions(sanitizedData, baseUrl);
                     const bypassNestedProxy = shouldBypassLatinoNestedProxy(baseUrl);
                     if (isMasterPlaylist && bypassNestedProxy) {
                         sanitizedData = await filterReachableHlsVariants(sanitizedData, baseUrl);
