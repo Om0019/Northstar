@@ -264,7 +264,8 @@ async function resolveOne(result) {
     }
 
     if (/fastream/i.test(host)) {
-      return resolveFastream(result, url);
+      console.log(`[WebstreamerLatino] Fastream skipped: ${result.url}`);
+      return [];
     }
 
     if (/goodstream/i.test(host)) {
@@ -373,16 +374,13 @@ function shouldProbePlayableStream(stream) {
     return true;
   }
 
-  if (player === 'filelions' || player === 'emturbovid') {
+  if (player === 'filelions' || player === 'emturbovid' || player === 'vimeos' || player === 'goodstream' || player === 'voe') {
     return false;
   }
 
   return [
-    'goodstream',
-    'fastream',
     'vimeos',
     'streamwish',
-    'voe',
     'doodstream',
     'mixdrop',
     'streamtape',

@@ -1,6 +1,6 @@
 /**
  * webstreamer-latino - Built from src/webstreamer-latino/
- * Generated: 2026-03-20T07:02:08.315Z
+ * Generated: 2026-03-20T07:14:27.744Z
  */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -1221,7 +1221,8 @@ function resolveOne(result) {
         return resolveStreamtape(result, url);
       }
       if (/fastream/i.test(host)) {
-        return resolveFastream(result, url);
+        console.log(`[WebstreamerLatino] Fastream skipped: ${result.url}`);
+        return [];
       }
       if (/goodstream/i.test(host)) {
         return resolveGoodstream(result, url);
@@ -1334,15 +1335,12 @@ function shouldProbePlayableStream(stream) {
   if (!player) {
     return true;
   }
-  if (player === "filelions" || player === "emturbovid") {
+  if (player === "filelions" || player === "emturbovid" || player === "vimeos" || player === "goodstream" || player === "voe") {
     return false;
   }
   return [
-    "goodstream",
-    "fastream",
     "vimeos",
     "streamwish",
-    "voe",
     "doodstream",
     "mixdrop",
     "streamtape"
@@ -1835,38 +1833,6 @@ function resolveStreamtape(result, url) {
       headers: finalUrl ? { Referer: finalUrl } : void 0,
       player: "Streamtape"
     })];
-  });
-}
-function resolveFastream(result, url) {
-  return __async(this, null, function* () {
-    const candidates = [
-      url.href,
-      url.href.replace("/e/", "/embed-").replace("/d/", "/embed-"),
-      url.href.replace("/embed-", "/d/")
-    ];
-    for (const candidate of candidates) {
-      const html = yield fetchText(candidate, { headers: result.headers }).catch(() => null);
-      if (!html) {
-        continue;
-      }
-      const unpacked = unpackPacker(html);
-      const fileMatch = unpacked.match(/sources:\[\{file:"(.*?)"/) || unpacked.match(/file:\s*"(https?:\/\/[^"]+\.m3u8[^"]*)"/);
-      if (!fileMatch) {
-        continue;
-      }
-      const titleMatch = html.match(/>Download (.*?)</);
-      const headers = { Referer: candidate };
-      const height = yield guessHeightFromPlaylist(fileMatch[1], headers);
-      return [buildStream(result, {
-        title: titleMatch ? titleMatch[1] : result.title,
-        url: fileMatch[1],
-        quality: height ? `${height}p` : "Auto",
-        headers,
-        player: "Fastream"
-      })];
-    }
-    console.log(`[WebstreamerLatino] Fastream miss: ${url.href}`);
-    return [];
   });
 }
 function resolveStreamEmbed(result, url) {
