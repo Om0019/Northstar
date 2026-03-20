@@ -25,6 +25,18 @@ function buildPlaybackHeaders(pageUrl, extra = {}) {
   };
 }
 
+function extractInlineCookieHeader(html) {
+  const cookiePairs = [];
+  const pattern = /\$\.cookie\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]/g;
+  let match;
+
+  while ((match = pattern.exec(String(html || '')))) {
+    cookiePairs.push(`${match[1]}=${match[2]}`);
+  }
+
+  return cookiePairs.join('; ');
+}
+
 function decodeBase64UrlToBytes(value) {
   const input = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
   const normalized = input.padEnd(input.length + ((4 - input.length % 4) % 4), '=');
@@ -1123,11 +1135,13 @@ async function resolveStreamEmbed(result, url) {
 
 async function resolveGoodstream(result, url) {
   const pageUrl = url.href;
-  const html = await fetchText(pageUrl, { headers: result.headers }).catch(() => null);
-  if (!html) {
+  const page = await fetchPage(pageUrl, { headers: result.headers }).catch(() => null);
+  if (!page?.text) {
     console.log(`[WebstreamerLatino] Goodstream miss: ${pageUrl}`);
     return [];
   }
+
+  const html = page.text;
 
   if (/expired|deleted|file is no longer available/i.test(html)) {
     console.log(`[WebstreamerLatino] Goodstream dead link: ${pageUrl}`);
@@ -1146,7 +1160,12 @@ async function resolveGoodstream(result, url) {
   }
 
   const playlistUrl = fileMatch[1].replace(/\\\//g, '/');
-  const streamHeaders = buildPlaybackHeaders(pageUrl);
+  const cookieHeader = extractInlineCookieHeader(html);
+  const streamHeaders = buildPlaybackHeaders(pageUrl, {
+    ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    Accept: '*/*',
+  });
   const height = await guessHeightFromPlaylist(playlistUrl, streamHeaders).catch(() => null);
 
   return [buildStream(result, {

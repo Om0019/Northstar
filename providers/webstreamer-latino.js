@@ -1039,6 +1039,15 @@ function buildPlaybackHeaders(pageUrl, extra = {}) {
   }
   return __spreadValues(__spreadValues(__spreadValues({}, origin ? { Origin: origin } : {}), finalPageUrl ? { Referer: finalPageUrl } : {}), extra);
 }
+function extractInlineCookieHeader(html) {
+  const cookiePairs = [];
+  const pattern = /\$\.cookie\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]*)['"]/g;
+  let match;
+  while (match = pattern.exec(String(html || ""))) {
+    cookiePairs.push(`${match[1]}=${match[2]}`);
+  }
+  return cookiePairs.join("; ");
+}
 function decodeBase64UrlToBytes(value) {
   const input = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
   const normalized = input.padEnd(input.length + (4 - input.length % 4) % 4, "=");
@@ -1861,11 +1870,12 @@ function resolveStreamEmbed(result, url) {
 function resolveGoodstream(result, url) {
   return __async(this, null, function* () {
     const pageUrl = url.href;
-    const html = yield fetchText(pageUrl, { headers: result.headers }).catch(() => null);
-    if (!html) {
+    const page = yield fetchPage(pageUrl, { headers: result.headers }).catch(() => null);
+    if (!(page == null ? void 0 : page.text)) {
       console.log(`[WebstreamerLatino] Goodstream miss: ${pageUrl}`);
       return [];
     }
+    const html = page.text;
     if (/expired|deleted|file is no longer available/i.test(html)) {
       console.log(`[WebstreamerLatino] Goodstream dead link: ${pageUrl}`);
       return [];
@@ -1876,7 +1886,11 @@ function resolveGoodstream(result, url) {
       return [];
     }
     const playlistUrl = fileMatch[1].replace(/\\\//g, "/");
-    const streamHeaders = buildPlaybackHeaders(pageUrl);
+    const cookieHeader = extractInlineCookieHeader(html);
+    const streamHeaders = buildPlaybackHeaders(pageUrl, __spreadValues({
+      "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+      Accept: "*/*"
+    }, cookieHeader ? { Cookie: cookieHeader } : {}));
     const height = yield guessHeightFromPlaylist(playlistUrl, streamHeaders).catch(() => null);
     return [buildStream(result, {
       url: playlistUrl,
